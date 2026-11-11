@@ -1,8 +1,10 @@
-import { Telegraf, session } from "telegraf";
+import { Telegraf } from "telegraf";
 import { config } from "../config/env.js";
 import { cancelCampaign, chooseDelivery, handleCampaignText, selectMethod, selectRecipients, showDelivery, showPreview, startCampaign } from "./campaign-flow.js";
 import { campaignMethodKeyboard, mainMenuKeyboard } from "./keyboards.js";
 import { audiences, analytics, campaigns, campaignList, dashboard, help, mainMenu, scheduled, settings, subscription, templates } from "./views.js";
+import { loadConversationState, saveConversationState } from "../modules/conversation-state/service.js";
+import { ensureUserWorkspace } from "../modules/users/service.js";
 
 const render = async (ctx, view) => {
   const { text, keyboard } = view(ctx.from);
@@ -16,7 +18,15 @@ const render = async (ctx, view) => {
 export const createBot = () => {
   if (!config.botToken) throw new Error("BOT_TOKEN is required to start the Telegram bot");
   const bot = new Telegraf(config.botToken);
-  bot.use(session());
+  bot.use(async (ctx, next) => {
+    if (!ctx.from) return next();
+    const workspace = await ensureUserWorkspace(ctx.from);
+    ctx.dbUser = workspace.user;
+    ctx.business = workspace.business;
+    ctx.session = await loadConversationState(ctx.from.id);
+    await next();
+    await saveConversationState(ctx.from.id, ctx.session);
+  });
 
   bot.start((ctx) => render(ctx, mainMenu));
   bot.command("menu", (ctx) => render(ctx, mainMenu));
