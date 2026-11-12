@@ -14,6 +14,15 @@ export const backMenuKeyboard = (back = "nav:main") => Markup.inlineKeyboard([
   [button("Back", back), button("Main Menu", "nav:main")]
 ]);
 
+export const audienceKeyboard = () => Markup.inlineKeyboard([
+  [button("All Recipients", "audience:list:all")],
+  [button("Individual Contacts", "audience:list:user")],
+  [button("Telegram Groups", "audience:list:group"), button("Telegram Channels", "audience:list:channel")],
+  [button("Add Current Chat", "audience:add:current")],
+  [button("Saved Audiences", "audience:saved"), button("Create Audience", "audience:create")],
+  [button("Main Menu", "nav:main")]
+]);
+
 export const dashboardKeyboard = () => Markup.inlineKeyboard([
   [button("Create Campaign", "campaign:create"), button("View Campaigns", "campaign:list")],
   [button("Manage Audience", "nav:audience"), button("View Analytics", "nav:analytics")],

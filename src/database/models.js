@@ -69,6 +69,7 @@ const campaignDeliverySchema = new Schema({
   attemptCount: { type: Number, default: 0, min: 0 },
   deliveredAt: Date
 }, timestamps);
+campaignDeliverySchema.index({ campaign: 1, recipient: 1 }, { unique: true });
 
 const templateSchema = new Schema({
   business: { type: objectId(), ref: "Business", required: true, index: true },

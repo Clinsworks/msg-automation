@@ -8,9 +8,11 @@ import {
   backMenuKeyboard,
   campaignsKeyboard,
   dashboardKeyboard,
+  audienceKeyboard,
   mainMenuKeyboard,
   paginationKeyboard,
 } from "./keyboards.js";
+import { listCampaigns } from "../modules/campaigns/service.js";
 
 export const mainMenu = (user) => {
   const workspace = getWorkspace(user);
@@ -29,7 +31,7 @@ export const dashboard = (user) => {
 };
 
 const listView = (title, items, formatter, prefix) => ({
-  text: `<b>${title}</b>\n\n${items.map(formatter).join("\n")}\n\n<i>Mock data for Phase 1.</i>`,
+  text: `<b>${title}</b>\n\n${items.length ? items.map(formatter).join("\n") : "No records found."}`,
   keyboard: paginationKeyboard(prefix, false),
 });
 
@@ -38,20 +40,23 @@ export const campaigns = () => ({
   keyboard: campaignsKeyboard(),
 });
 
-export const campaignList = () =>
-  listView(
-    "All Campaigns",
-    getMockCampaigns(),
+export const campaignList = async (ctx, status) => {
+  const items = await listCampaigns(ctx.business._id, status);
+  return listView(
+    status ? `${status[0].toUpperCase()}${status.slice(1)} Campaigns` : "All Campaigns",
+    items.map((item) => ({
+      name: item.name,
+      status: item.status,
+      recipients: item.recipients.length,
+    })),
     (item) => `• ${item.name} — ${item.status} (${item.recipients} recipients)`,
     "campaign",
   );
-export const audiences = () =>
-  listView(
-    "Audience",
-    getMockAudiences(),
-    (item) => `• ${item.name} — ${item.size} recipients`,
-    "audience",
-  );
+};
+export const audiences = () => ({
+  text: "<b>Audience</b>\n\nManage recipients and destinations that the bot is legitimately allowed to reach.\n\nThe bot cannot access a user's personal contacts. Add a current chat or use a Telegram chat where the bot has been added.",
+  keyboard: audienceKeyboard(),
+});
 export const templates = () =>
   listView(
     "Templates",
