@@ -6,5 +6,6 @@ export const config = {
   paystackCallbackUrl: process.env.PAYSTACK_CALLBACK_URL,
   telegramApiId: Number(process.env.TELEGRAM_API_ID),
   telegramApiHash: process.env.TELEGRAM_API_HASH,
-  sessionEncryptionKey: process.env.SESSION_ENCRYPTION_KEY
+  sessionEncryptionKey: process.env.SESSION_ENCRYPTION_KEY,
+  superadminPassword: process.env.SUPERADMIN_PASSWORD
 };

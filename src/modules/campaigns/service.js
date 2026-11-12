@@ -54,13 +54,23 @@ export const executeCampaign = async ({ campaignId, businessId, provider }) => {
   const results = [];
 
   for (const recipient of campaign.recipients) {
-    const delivery = await CampaignDelivery.create({
-      campaign: campaign._id,
-      recipient: recipient._id,
-      sendingProvider: campaign.sendingMethod === "personal_account" ? "telegram_user" : providerName,
-      status: "pending",
-      attemptCount: 1
-    });
+    const delivery = await CampaignDelivery.findOneAndUpdate(
+      { campaign: campaign._id, recipient: recipient._id },
+      {
+        $setOnInsert: {
+          campaign: campaign._id,
+          recipient: recipient._id,
+          sendingProvider: campaign.sendingMethod === "personal_account" ? "telegram_user" : providerName,
+          status: "pending"
+        },
+        $inc: { attemptCount: 1 }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    if (delivery.status === "sent") {
+      results.push({ recipient, status: "sent", telegramMessageId: delivery.telegramMessageId });
+      continue;
+    }
     try {
       const message = await provider.sendMessage(recipient.telegramDestinationId, campaign.messageContent);
       delivery.status = "sent";

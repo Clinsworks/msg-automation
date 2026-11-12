@@ -1,8 +1,8 @@
 import { Telegraf } from "telegraf";
 import { config } from "../config/env.js";
-import { cancelCampaign, chooseDelivery, handleCampaignText, saveDraft, scheduleCampaign, selectMethod, selectRecipients, sendCampaign, showDelivery, showPreview, startCampaign } from "./campaign-flow.js";
-import { campaignMethodKeyboard, campaignRecipientsKeyboard, mainMenuKeyboard } from "./keyboards.js";
-import { audiences, analytics, campaigns, campaignList, dashboard, help, mainMenu, paymentHistory, scheduled, settings, subscription, subscriptionPlans, templates } from "./views.js";
+import { cancelCampaign, chooseDelivery, handleCampaignText, saveDraft, scheduleCampaign, selectAudience, selectMethod, selectRecipients, sendCampaign, showDelivery, showPreview, startCampaign } from "./campaign-flow.js";
+import { addBotToGroupKeyboard, campaignMethodKeyboard, campaignRecipientsKeyboard, channelSelectionKeyboard, contactSelectionKeyboard, mainMenuKeyboard } from "./keyboards.js";
+import { audiences, analytics, campaigns, campaignAudiences, campaignList, createAudience, dashboard, help, mainMenu, paymentHistory, recipientList, savedAudiences, scheduled, settings, subscription, subscriptionPlans, templates } from "./views.js";
 import { loadConversationState, saveConversationState } from "../modules/conversation-state/service.js";
 import { ensureUserWorkspace } from "../modules/users/service.js";
 import { listRecipients, registerRecipient, removeRecipient } from "../modules/recipients/service.js";
@@ -12,6 +12,8 @@ import { updateUserEmail } from "../modules/users/service.js";
 import { getActivePlans } from "../modules/subscriptions/service.js";
 import { canAccessFeature } from "../modules/subscriptions/service.js";
 import { beginConnection, completeConnection, disconnectPersonalAccount } from "../modules/telegram/connection-service.js";
+import { findExpiringSubscription, getSubscriptionNotification } from "../modules/notifications/service.js";
+import { cancelAdminAuth, forgotAdminPassword, guide, handleAdminPassword, handleSuperadminPassword, requestAdminPassword, showAdminPanel, showGuide, startScreen, startSuperadminAuth } from "./auth-flow.js";
 
 const render = async (ctx, view, viewArgument = ctx.from) => {
   const { text, keyboard } = await view(viewArgument);
@@ -46,9 +48,87 @@ export const createBot = () => {
     await saveConversationState(ctx.from.id, ctx.session);
   });
 
-  bot.start((ctx) => render(ctx, mainMenu));
-  bot.command("menu", (ctx) => render(ctx, mainMenu));
+  bot.use(async (ctx, next) => {
+    if (!ctx.callbackQuery || ctx.session.adminUnlocked || ctx.session.superadminUnlocked) return next();
+    const action = ctx.callbackQuery.data || "";
+    if (["start:admin", "start:guide", "auth:forgot", "auth:cancel"].includes(action)) return next();
+    await ctx.answerCbQuery("Open Admin Panel and enter your password first.");
+  });
+
+  bot.use(async (ctx, next) => {
+    const text = ctx.message?.text || "";
+    const command = text.match(/^\/([a-z0-9_]+)/i)?.[1]?.toLowerCase();
+    if (!command || ctx.session.adminUnlocked || ctx.session.superadminUnlocked || ["start", "help", "myid", "superadmin"].includes(command)) return next();
+    await ctx.reply("Admin access is locked. Use /start and choose Admin Panel.");
+  });
+
+  bot.start(async (ctx) => {
+    const payload = ctx.startPayload || "";
+    if (payload.startsWith("add_recipient_")) {
+      const ownerId = payload.slice("add_recipient_".length);
+      if (String(ctx.from.id) !== ownerId) {
+        await ctx.reply("Only the user who started this add flow can register this chat.");
+        return;
+      }
+      if (!["group", "supergroup", "channel"].includes(ctx.chat?.type)) {
+        await ctx.reply("Open the Add Bot link and select a group or channel to continue.");
+        return;
+      }
+      try {
+        const recipient = await registerRecipient({ businessId: ctx.business._id, destinationId: ctx.chat.id, provider });
+        await ctx.reply(`✅ ${recipient.displayName} was added as a recipient.\nThe bot has verified its permissions and can send messages to this chat.`);
+      } catch (error) {
+        await ctx.reply(error.code === "INELIGIBLE_DESTINATION"
+          ? error.message
+          : "The bot was added, but could not verify permission to send messages in this chat.");
+      }
+      return;
+    }
+    await render(ctx, startScreen, ctx);
+    const expiring = await findExpiringSubscription(ctx.business._id);
+    if (expiring) await ctx.reply(getSubscriptionNotification(expiring));
+  });
+  bot.command("menu", async (ctx) => {
+    if (!ctx.session.adminUnlocked && !ctx.session.superadminUnlocked) {
+      await ctx.reply("Admin access is locked. Use /start and choose Admin Panel.");
+      return;
+    }
+    await render(ctx, mainMenu, ctx);
+  });
   bot.command("help", (ctx) => render(ctx, help));
+  bot.command("superadmin", startSuperadminAuth);
+  bot.hears("Admin Panel", showAdminPanel);
+  bot.hears("Guide", showGuide);
+  bot.hears("Support", (ctx) => render(ctx, help));
+  bot.hears("Cancel", (ctx) => ctx.reply("Chat selection cancelled."));
+  bot.on("message", async (ctx, next) => {
+    const sharedUsers = ctx.message?.users_shared?.user_ids || [];
+    if (sharedUsers.length) {
+      const results = await Promise.allSettled(sharedUsers.map((destinationId) =>
+        registerRecipient({ businessId: ctx.business._id, destinationId, provider })
+      ));
+      const saved = results.filter((result) => result.status === "fulfilled").length;
+      const rejected = results.length - saved;
+      await ctx.reply(
+        `Added ${saved} contact${saved === 1 ? "" : "s"} to recipients.${rejected ? ` ${rejected} contact${rejected === 1 ? "" : "s"} could not be verified by the bot.` : ""}`,
+        { reply_markup: { remove_keyboard: true } }
+      );
+      return;
+    }
+    const shared = ctx.message?.chat_shared;
+    if (!shared) return next();
+    try {
+      const recipient = await registerRecipient({ businessId: ctx.business._id, destinationId: shared.chat_id, provider });
+      await ctx.reply(`Recipient saved: ${recipient.displayName}\nType: ${recipient.destinationType}`, { reply_markup: { remove_keyboard: true } });
+    } catch (error) {
+      await ctx.reply(error.code === "INELIGIBLE_DESTINATION" ? error.message : "Unable to add the selected chat.");
+    }
+  });
+  bot.on("text", async (ctx, next) => {
+    if (await handleSuperadminPassword(ctx)) return;
+    if (await handleAdminPassword(ctx)) return;
+    if (!(await handleCampaignText(ctx))) await next();
+  });
   bot.command("setemail", async (ctx) => {
     const email = ctx.message.text.split(/\s+/)[1];
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -128,17 +208,24 @@ export const createBot = () => {
     const recipient = await removeRecipient(ctx.business._id, destinationId);
     await ctx.reply(recipient ? "Recipient disabled for sending." : "Recipient was not found.");
   });
-  bot.on("text", async (ctx, next) => {
-    if (!(await handleCampaignText(ctx))) await next();
-  });
+  bot.action("start:admin", requestAdminPassword);
+  bot.action("start:guide", guide);
+  bot.action("auth:forgot", forgotAdminPassword);
+  bot.action("auth:cancel", cancelAdminAuth);
 
-  bot.action("nav:main", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, mainMenu); });
-  bot.action("nav:dashboard", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, dashboard); });
+  bot.action("nav:main", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, mainMenu, ctx); });
+  bot.action("nav:dashboard", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, dashboard, ctx); });
   bot.action("nav:campaigns", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, campaigns); });
   bot.action("nav:audience", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, audiences); });
-  bot.action("nav:scheduled", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, scheduled); });
-  bot.action("nav:templates", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, templates); });
-  bot.action("nav:analytics", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, analytics); });
+  bot.action("nav:scheduled", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, scheduled, ctx); });
+  bot.action("nav:templates", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, templates, ctx); });
+  bot.action("nav:analytics", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, analytics, ctx); });
+  for (const range of ["today", "7d", "30d", "all"]) {
+    bot.action(`analytics:${range}`, async (ctx) => {
+      await ctx.answerCbQuery();
+      await render(ctx, () => analytics(ctx, range), ctx);
+    });
+  }
   bot.action("nav:subscription", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, () => subscription(ctx), ctx); });
   bot.action("nav:settings", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, settings); });
   bot.action("nav:help", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, help); });
@@ -178,7 +265,15 @@ export const createBot = () => {
     await ctx.editMessageText("<b>Premium sending</b>\n\nYour Pro entitlement is active. A connected personal Telegram account is required before sending.", { parse_mode: "HTML", ...campaignRecipientsKeyboard() });
   });
   bot.action("campaign:recipient:individual", async (ctx) => selectRecipients(ctx, "user"));
-  bot.action("campaign:recipient:audience", async (ctx) => selectRecipients(ctx, "all"));
+  bot.action("campaign:recipient:audience", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, campaignAudiences, ctx); });
+  bot.action(/^campaign:audience:(.+)$/, async (ctx) => {
+    try {
+      await selectAudience(ctx, ctx.match[1]);
+    } catch (error) {
+      await ctx.answerCbQuery("Unable to select audience");
+      await ctx.reply(error.message);
+    }
+  });
   bot.action("campaign:recipient:groups", async (ctx) => selectRecipients(ctx, "group"));
   bot.action("campaign:recipient:channels", async (ctx) => selectRecipients(ctx, "channel"));
   bot.action("campaign:recipient:all", async (ctx) => selectRecipients(ctx, "all"));
@@ -207,19 +302,31 @@ export const createBot = () => {
       if (error.code !== "INELIGIBLE_DESTINATION") throw error;
     }
   });
-  for (const type of ["all", "user", "group", "channel"]) {
+  bot.action("audience:add:group", async (ctx) => {
+    await ctx.answerCbQuery();
+    const { username } = await provider.getConnectionStatus();
+    if (!username) {
+      await ctx.reply("The bot username is unavailable. Try again after the bot is connected.");
+      return;
+    }
+    await ctx.reply("Choose a group from Telegram. Confirm adding the bot and grant it permission to send messages. The bot will register the chat automatically.", addBotToGroupKeyboard(username, ctx.from.id));
+  });
+  bot.action("audience:add:channel-help", async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply("Add the bot as an administrator with permission to post, then select the channel below.", channelSelectionKeyboard());
+  });
+  for (const type of ["group", "channel"]) {
     bot.action(`audience:list:${type}`, async (ctx) => {
-      const filter = type === "all" ? {} : { destinationType: type };
-      const recipients = await listRecipients(ctx.business._id, { ...filter, sendingEligible: true });
-      const text = recipients.length
-        ? recipients.map((recipient) => `• ${recipient.displayName} — ${recipient.destinationType}`).join("\n")
-        : "No eligible recipients found.";
       await ctx.answerCbQuery();
-      await ctx.editMessageText(`<b>Recipients</b>\n\n${text}`, { parse_mode: "HTML", ...mainMenuKeyboard() });
+      await render(ctx, () => recipientList(ctx, type), ctx);
     });
   }
-  bot.action("audience:saved", async (ctx) => { await ctx.answerCbQuery("Audience management is available in the campaign phase."); });
-  bot.action("audience:create", async (ctx) => { await ctx.answerCbQuery("Audience creation is available in the campaign phase."); });
+  bot.action("audience:saved", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, savedAudiences, ctx); });
+  bot.action("audience:create", async (ctx) => {
+    await ctx.answerCbQuery();
+    await render(ctx, createAudience, ctx);
+    await ctx.reply("Select the user contacts you want to add.", contactSelectionKeyboard());
+  });
   bot.catch((error) => console.error("Telegram bot error:", error));
   return bot;
 };

@@ -10,6 +10,24 @@ export const mainMenuKeyboard = () => Markup.inlineKeyboard([
   [button("Help & Support", "nav:help")]
 ]);
 
+export const startKeyboard = () => Markup.inlineKeyboard([
+  [button("Admin Panel", "start:admin"), button("Guide", "start:guide")],
+]);
+
+export const publicKeyboard = () => Markup.keyboard([
+  ["Admin Panel", "Guide"],
+  ["Support"],
+]).resize();
+
+export const menuOptionsKeyboard = () => Markup.inlineKeyboard([
+  [button("Admin Panel", "start:admin"), button("Guide", "start:guide")],
+]);
+
+export const adminAuthKeyboard = () => Markup.inlineKeyboard([
+  [button("Forgot password?", "auth:forgot")],
+  [button("Cancel", "auth:cancel")],
+]);
+
 export const backMenuKeyboard = (back = "nav:main") => Markup.inlineKeyboard([
   [button("Back", back), button("Main Menu", "nav:main")]
 ]);
@@ -22,13 +40,33 @@ export const subscriptionKeyboard = (plans = []) => Markup.inlineKeyboard([
   [button("Payment History", "subscription:history"), button("Main Menu", "nav:main")]
 ]);
 
+export const analyticsKeyboard = () => Markup.inlineKeyboard([
+  [button("Today", "analytics:today"), button("Last 7 Days", "analytics:7d")],
+  [button("Last 30 Days", "analytics:30d"), button("All Time", "analytics:all")],
+  [button("Main Menu", "nav:main")],
+]);
+
 export const audienceKeyboard = () => Markup.inlineKeyboard([
-  [button("All Recipients", "audience:list:all")],
-  [button("Individual Contacts", "audience:list:user")],
   [button("Telegram Groups", "audience:list:group"), button("Telegram Channels", "audience:list:channel")],
-  [button("Add Current Chat", "audience:add:current")],
+  [button("Add Bot to a Group", "audience:add:group")],
   [button("Saved Audiences", "audience:saved"), button("Create Audience", "audience:create")],
   [button("Main Menu", "nav:main")]
+]);
+
+export const contactSelectionKeyboard = () => Markup.keyboard([
+  [Markup.button.userRequest("Select User Contacts", 2001, { max_quantity: 20 })],
+  ["Cancel"],
+]).oneTime().resize();
+
+export const channelSelectionKeyboard = () => Markup.keyboard([
+  [Markup.button.channelRequest("Select Existing Channel", 1002, { request_title: true })],
+  ["Cancel"],
+]).oneTime().resize();
+
+export const addBotToGroupKeyboard = (botUsername, ownerId) => Markup.inlineKeyboard([
+  [Markup.button.url("Add Bot to a Group", `https://t.me/${botUsername}?startgroup=add_recipient_${ownerId}`)],
+  [button("How to add a Channel", "audience:add:channel-help")],
+  [button("Back to Audience", "nav:audience")],
 ]);
 
 export const dashboardKeyboard = () => Markup.inlineKeyboard([
@@ -60,6 +98,13 @@ export const campaignRecipientsKeyboard = () => Markup.inlineKeyboard([
   [button("Select All", "campaign:recipient:all"), button("Deselect All", "campaign:recipient:none")],
   [button("Next", "campaign:delivery"), button("Back", "campaign:back:method")],
   [button("Cancel", "flow:cancel")]
+]);
+
+export const campaignAudienceKeyboard = (audiences) => Markup.inlineKeyboard([
+  ...audiences.map((audience) => [
+    button(`${audience.name} (${audience.recipients.length})`, `campaign:audience:${audience._id}`),
+  ]),
+  [button("Back", "campaign:back:method"), button("Cancel", "flow:cancel")],
 ]);
 
 export const campaignDeliveryKeyboard = () => Markup.inlineKeyboard([

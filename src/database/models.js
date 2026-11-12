@@ -18,6 +18,8 @@ const businessSchema = new Schema({
   name: { type: String, required: true, trim: true, maxlength: 120 },
   description: { type: String, trim: true, maxlength: 500 },
   owner: { type: objectId(), ref: "User", required: true, unique: true, index: true },
+  adminPasswordHash: { type: String, required: true, select: false },
+  adminPasswordChangedAt: { type: Date },
   status: { type: String, enum: ["active", "suspended"], default: "active", index: true }
 }, timestamps);
 

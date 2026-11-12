@@ -13,6 +13,7 @@ import {
 import { canAccessFeature } from "../modules/subscriptions/service.js";
 import { getPersonalProvider } from "../modules/telegram/connection-service.js";
 import { TelegramUserProvider } from "../modules/telegram/user-provider.js";
+import { Audience } from "../database/models.js";
 
 const flowMessage = (ctx, text, keyboard) =>
   ctx.reply(text, { parse_mode: "HTML", ...keyboard });
@@ -36,7 +37,7 @@ export const handleCampaignText = async (ctx) => {
     campaign.step = "message";
     await flowMessage(
       ctx,
-      "<b>Create campaign</b>\n\nStep 2 of 6: Send the message content.\n\nPlain text, Telegram formatting, links, images, videos and documents are supported by the future delivery layer.",
+      "<b>Create campaign</b>\n\nStep 2 of 6: Send the message content.\n\nPlain text, Telegram formatting, and links are supported. Media delivery can be added to the campaign record in a later update.",
       {},
     );
   } else if (campaign.step === "message") {
@@ -89,6 +90,28 @@ export const selectRecipients = async (ctx, type) => {
     ? recipients.map((recipient) => recipient.displayName).join(", ")
     : "None selected";
   await ctx.answerCbQuery(`${recipients.length} recipient(s) selected`);
+};
+
+export const selectAudience = async (ctx, audienceId) => {
+  const audience = await Audience.findOne({
+    _id: audienceId,
+    business: ctx.business._id,
+  }).populate({
+    path: "recipients",
+    match: { sendingEligible: true },
+    select: "displayName",
+  });
+  if (!audience) throw new Error("Saved audience not found.");
+  const recipients = audience.recipients || [];
+  ctx.session.campaign.recipientIds = recipients.map((recipient) => String(recipient._id));
+  ctx.session.campaign.recipients = recipients.length
+    ? `${audience.name} (${recipients.length} recipients)`
+    : `${audience.name} (no eligible recipients)`;
+  await ctx.answerCbQuery(`${recipients.length} recipient(s) selected`);
+  await ctx.editMessageText(
+    `<b>Recipients selected</b>\n\n${ctx.session.campaign.recipients}`,
+    { parse_mode: "HTML", ...campaignRecipientsKeyboard() },
+  );
 };
 
 export const showDelivery = async (ctx) => {
@@ -160,30 +183,33 @@ export const scheduleCampaign = async (ctx) => {
 export const sendCampaign = async (ctx, botProvider) => {
   let provider = botProvider;
   let personalClient;
-  if (ctx.session.campaign.method === "Premium Personal Account") {
-    const connection = await getPersonalProvider(ctx.business._id);
-    personalClient = connection.client;
-    provider = new TelegramUserProvider(personalClient);
+  try {
+    if (ctx.session.campaign.method === "Premium Personal Account") {
+      const connection = await getPersonalProvider(ctx.business._id);
+      personalClient = connection.client;
+      provider = new TelegramUserProvider(personalClient);
+    }
+    const campaign = await createCampaign({
+      businessId: ctx.business._id,
+      input: ctx.session.campaign,
+      status: "draft",
+    });
+    const result = await executeCampaign({
+      campaignId: campaign._id,
+      businessId: ctx.business._id,
+      provider,
+    });
+    const successful = result.results.filter((item) => item.status === "sent").length;
+    const failed = result.results.length - successful;
+    delete ctx.session.campaign;
+    await ctx.answerCbQuery("Delivery complete");
+    await ctx.editMessageText(
+      `<b>Campaign result</b>\n\nCampaign: ${campaign.name}\nTotal attempted: ${result.results.length}\nSuccessful deliveries: ${successful}\nFailed deliveries: ${failed}\nStatus: ${result.campaign.status}`,
+      { parse_mode: "HTML", ...mainMenuKeyboard() },
+    );
+  } finally {
+    if (personalClient) await personalClient.disconnect();
   }
-  const campaign = await createCampaign({
-    businessId: ctx.business._id,
-    input: ctx.session.campaign,
-    status: "draft",
-  });
-  const result = await executeCampaign({
-    campaignId: campaign._id,
-    businessId: ctx.business._id,
-    provider,
-  });
-  if (personalClient) await personalClient.disconnect();
-  const successful = result.results.filter((item) => item.status === "sent").length;
-  const failed = result.results.length - successful;
-  delete ctx.session.campaign;
-  await ctx.answerCbQuery("Delivery complete");
-  await ctx.editMessageText(
-    `<b>Campaign result</b>\n\nCampaign: ${campaign.name}\nTotal attempted: ${result.results.length}\nSuccessful deliveries: ${successful}\nFailed deliveries: ${failed}\nStatus: ${result.campaign.status}`,
-    { parse_mode: "HTML", ...mainMenuKeyboard() },
-  );
 };
 
 export const cancelCampaign = async (ctx) => {
