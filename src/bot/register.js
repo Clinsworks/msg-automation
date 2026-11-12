@@ -2,11 +2,16 @@ import { Telegraf } from "telegraf";
 import { config } from "../config/env.js";
 import { cancelCampaign, chooseDelivery, handleCampaignText, saveDraft, scheduleCampaign, selectMethod, selectRecipients, sendCampaign, showDelivery, showPreview, startCampaign } from "./campaign-flow.js";
 import { campaignMethodKeyboard, campaignRecipientsKeyboard, mainMenuKeyboard } from "./keyboards.js";
-import { audiences, analytics, campaigns, campaignList, dashboard, help, mainMenu, scheduled, settings, subscription, templates } from "./views.js";
+import { audiences, analytics, campaigns, campaignList, dashboard, help, mainMenu, paymentHistory, scheduled, settings, subscription, subscriptionPlans, templates } from "./views.js";
 import { loadConversationState, saveConversationState } from "../modules/conversation-state/service.js";
 import { ensureUserWorkspace } from "../modules/users/service.js";
 import { listRecipients, registerRecipient, removeRecipient } from "../modules/recipients/service.js";
 import { TelegramBotProvider } from "../modules/messaging/providers/telegram-bot-provider.js";
+import { initializePayment } from "../modules/payments/service.js";
+import { updateUserEmail } from "../modules/users/service.js";
+import { getActivePlans } from "../modules/subscriptions/service.js";
+import { canAccessFeature } from "../modules/subscriptions/service.js";
+import { beginConnection, completeConnection, disconnectPersonalAccount } from "../modules/telegram/connection-service.js";
 
 const render = async (ctx, view, viewArgument = ctx.from) => {
   const { text, keyboard } = await view(viewArgument);
@@ -27,7 +32,7 @@ const runCampaignAction = (action) => async (ctx) => {
   }
 };
 
-export const createBot = ({ queue } = {}) => {
+export const createBot = () => {
   if (!config.botToken) throw new Error("BOT_TOKEN is required to start the Telegram bot");
   const bot = new Telegraf(config.botToken);
   const provider = new TelegramBotProvider(bot.telegram);
@@ -44,6 +49,51 @@ export const createBot = ({ queue } = {}) => {
   bot.start((ctx) => render(ctx, mainMenu));
   bot.command("menu", (ctx) => render(ctx, mainMenu));
   bot.command("help", (ctx) => render(ctx, help));
+  bot.command("setemail", async (ctx) => {
+    const email = ctx.message.text.split(/\s+/)[1];
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      await ctx.reply("Usage: /setemail <billing_email>");
+      return;
+    }
+    ctx.dbUser = await updateUserEmail(ctx.dbUser._id, email);
+    await ctx.reply("Billing email saved securely.");
+  });
+  bot.command("connecttelegram", async (ctx) => {
+    const phoneNumber = ctx.message.text.split(/\s+/)[1];
+    if (!phoneNumber) {
+      await ctx.reply("Usage: /connecttelegram +2348012345678");
+      return;
+    }
+    try {
+      if (!(await canAccessFeature(ctx.business._id, "personal_telegram"))) {
+        await ctx.reply("An active Pro subscription is required before connecting a personal Telegram account.");
+        return;
+      }
+      await beginConnection({ businessId: ctx.business._id, phoneNumber });
+      ctx.session.telegramAuth = { step: "code" };
+      await ctx.reply("Telegram sent a verification code. Reply with /telegramcode <code>. Never share this code with anyone.");
+    } catch (error) {
+      await ctx.reply(`Unable to start Telegram connection: ${error.message}`);
+    }
+  });
+  bot.command("telegramcode", async (ctx) => {
+    const code = ctx.message.text.split(/\s+/)[1];
+    if (!code) {
+      await ctx.reply("Usage: /telegramcode <verification_code>");
+      return;
+    }
+    try {
+      const account = await completeConnection({ businessId: ctx.business._id, phoneCode: code });
+      delete ctx.session.telegramAuth;
+      await ctx.reply(`Personal Telegram account connected: @${account.username || "account"}`);
+    } catch (error) {
+      await ctx.reply(`Unable to complete Telegram connection: ${error.message}`);
+    }
+  });
+  bot.command("disconnecttelegram", async (ctx) => {
+    await disconnectPersonalAccount(ctx.business._id);
+    await ctx.reply("Personal Telegram account disconnected and its stored session was removed.");
+  });
   bot.command("myid", (ctx) => ctx.reply(`Your Telegram user ID is ${ctx.from.id}.`));
   bot.command("addrecipient", async (ctx) => {
     const destinationId = ctx.message.text.split(/\s+/)[1];
@@ -89,9 +139,28 @@ export const createBot = ({ queue } = {}) => {
   bot.action("nav:scheduled", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, scheduled); });
   bot.action("nav:templates", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, templates); });
   bot.action("nav:analytics", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, analytics); });
-  bot.action("nav:subscription", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, subscription); });
+  bot.action("nav:subscription", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, () => subscription(ctx), ctx); });
   bot.action("nav:settings", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, settings); });
   bot.action("nav:help", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, help); });
+  bot.action("subscription:plans", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, subscriptionPlans); });
+  bot.action("subscription:history", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, () => paymentHistory(ctx), ctx); });
+  bot.action(/^subscription:buy:(.+)$/, async (ctx) => {
+    try {
+      const plans = await getActivePlans();
+      const plan = plans.find((item) => String(item._id) === ctx.match[1]);
+      if (!plan) throw new Error("Selected plan is no longer available.");
+      const result = await initializePayment({
+        businessId: ctx.business._id,
+        userEmail: ctx.dbUser.email,
+        planId: plan._id
+      });
+      await ctx.answerCbQuery("Checkout created");
+      await ctx.editMessageText(`<b>${plan.name} checkout</b>\n\nAmount: ₦${plan.price.toLocaleString()}\n\nComplete payment securely here:\n${result.checkoutUrl}\n\nYour subscription activates only after Paystack verification.`, { parse_mode: "HTML", ...mainMenuKeyboard() });
+    } catch (error) {
+      await ctx.answerCbQuery("Unable to create checkout");
+      await ctx.reply(error.message);
+    }
+  });
 
   bot.action("campaign:create", async (ctx) => { await ctx.answerCbQuery(); await startCampaign(ctx); });
   bot.action("campaign:list", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, () => campaignList(ctx), ctx); });
@@ -101,7 +170,12 @@ export const createBot = ({ queue } = {}) => {
   bot.action("campaign:method:standard", async (ctx) => { await ctx.answerCbQuery(); await selectMethod(ctx, "Standard Bot"); });
   bot.action("campaign:method:premium", async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.editMessageText("<b>Premium sending</b>\n\nAn active subscription and authorized Telegram account are required. This feature is not enabled in Phase 1.", { parse_mode: "HTML", ...campaignMethodKeyboard() });
+    if (!(await canAccessFeature(ctx.business._id, "personal_telegram"))) {
+      await ctx.editMessageText("<b>Premium sending</b>\n\nAn active Pro subscription is required for personal Telegram sending.", { parse_mode: "HTML", ...mainMenuKeyboard() });
+      return;
+    }
+    ctx.session.campaign.method = "Premium Personal Account";
+    await ctx.editMessageText("<b>Premium sending</b>\n\nYour Pro entitlement is active. A connected personal Telegram account is required before sending.", { parse_mode: "HTML", ...campaignRecipientsKeyboard() });
   });
   bot.action("campaign:recipient:individual", async (ctx) => selectRecipients(ctx, "user"));
   bot.action("campaign:recipient:audience", async (ctx) => selectRecipients(ctx, "all"));
@@ -113,8 +187,8 @@ export const createBot = ({ queue } = {}) => {
   bot.action("campaign:delivery:now", async (ctx) => { await ctx.answerCbQuery(); await chooseDelivery(ctx, "now"); });
   bot.action("campaign:delivery:schedule", async (ctx) => { await ctx.answerCbQuery(); await chooseDelivery(ctx, "schedule"); });
   bot.action("campaign:delivery:draft", async (ctx) => { await ctx.answerCbQuery(); await chooseDelivery(ctx, "draft"); });
-  bot.action("campaign:confirm:send", runCampaignAction((ctx) => sendCampaign(ctx, queue)));
-  bot.action("campaign:confirm:schedule", runCampaignAction((ctx) => scheduleCampaign(ctx, queue)));
+  bot.action("campaign:confirm:send", runCampaignAction((ctx) => sendCampaign(ctx, provider)));
+  bot.action("campaign:confirm:schedule", runCampaignAction(scheduleCampaign));
   bot.action("campaign:confirm:draft", runCampaignAction(saveDraft));
   bot.action("campaign:back:name", async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText("Send a campaign name.", { parse_mode: "HTML" }); ctx.session.campaign.step = "name"; });
   bot.action("campaign:back:method", async (ctx) => { await ctx.answerCbQuery(); await ctx.editMessageText("Choose a sending method.", { parse_mode: "HTML", ...campaignMethodKeyboard() }); ctx.session.campaign.step = "method"; });

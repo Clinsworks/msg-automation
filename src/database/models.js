@@ -9,6 +9,7 @@ const userSchema = new Schema({
   firstName: { type: String, required: true, trim: true },
   lastName: { type: String, trim: true },
   username: { type: String, trim: true },
+  email: { type: String, trim: true, lowercase: true },
   accountStatus: { type: String, enum: ["active", "suspended"], default: "active", index: true },
   business: { type: objectId(), ref: "Business", unique: true, sparse: true }
 }, timestamps);

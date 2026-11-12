@@ -11,8 +11,10 @@ import {
   audienceKeyboard,
   mainMenuKeyboard,
   paginationKeyboard,
+  subscriptionKeyboard,
 } from "./keyboards.js";
 import { listCampaigns } from "../modules/campaigns/service.js";
+import { getActivePlans, getBusinessSubscription, getPaymentHistory } from "../modules/subscriptions/service.js";
 
 export const mainMenu = (user) => {
   const workspace = getWorkspace(user);
@@ -75,10 +77,35 @@ export const analytics = () => ({
   keyboard: backMenuKeyboard(),
 });
 
-export const subscription = () => ({
-  text: "<b>Subscription</b>\n\nCurrent plan: Free\nStatus: Active\nStart date: Not available\nExpiry date: No expiry\nRemaining days: —\n\n<b>Available plans</b>\n• Free — interface access\n• Basic — configurable limits\n• Pro — premium sending method\n• Business — future plan\n\nPayment processing is not active in Phase 1.",
-  keyboard: backMenuKeyboard(),
-});
+export const subscription = async (ctx) => {
+  const [current, plans] = await Promise.all([
+    getBusinessSubscription(ctx.business._id),
+    getActivePlans(),
+  ]);
+  const status = current?.expiresAt > new Date() ? current.status : "expired";
+  const planName = current?.plan?.name || "Free";
+  const expiry = current?.expiresAt ? current.expiresAt.toISOString() : "No expiry";
+  return {
+    text: `<b>Subscription</b>\n\nCurrent plan: ${planName}\nStatus: ${status}\nExpiry date: ${expiry}\n\nSelect a plan to open a secure Paystack checkout. Subscription activation only occurs after verified payment.`,
+    keyboard: subscriptionKeyboard(plans),
+  };
+};
+
+export const subscriptionPlans = async () => {
+  const plans = await getActivePlans();
+  return {
+    text: `<b>Available plans</b>\n\n${plans.map((plan) => `• ${plan.name}: ₦${plan.price.toLocaleString()} / ${plan.durationDays} days\n  Campaigns: ${plan.usageLimits.campaigns ?? "—"} | Messages: ${plan.usageLimits.messages ?? "—"}\n  Features: ${plan.entitlements.join(", ")}`).join("\n\n")}`,
+    keyboard: subscriptionKeyboard(plans),
+  };
+};
+
+export const paymentHistory = async (ctx) => {
+  const payments = await getPaymentHistory(ctx.business._id);
+  return {
+    text: `<b>Payment history</b>\n\n${payments.length ? payments.map((payment) => `• ${payment.paystackReference} — ${payment.status} — ₦${payment.amount.toLocaleString()}`).join("\n") : "No payments recorded."}`,
+    keyboard: backMenuKeyboard("nav:subscription"),
+  };
+};
 
 export const settings = () => ({
   text: "<b>Settings</b>\n\nManage your workspace preferences.",

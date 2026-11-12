@@ -7,10 +7,12 @@ import {
 } from "./keyboards.js";
 import {
   createCampaign,
+  executeCampaign,
   findEligibleRecipients,
-  prepareCampaignDeliveries,
 } from "../modules/campaigns/service.js";
-import { enqueueCampaign } from "../modules/campaigns/queue.js";
+import { canAccessFeature } from "../modules/subscriptions/service.js";
+import { getPersonalProvider } from "../modules/telegram/connection-service.js";
+import { TelegramUserProvider } from "../modules/telegram/user-provider.js";
 
 const flowMessage = (ctx, text, keyboard) =>
   ctx.reply(text, { parse_mode: "HTML", ...keyboard });
@@ -100,6 +102,10 @@ export const showDelivery = async (ctx) => {
 export const chooseDelivery = async (ctx, option) => {
   const campaign = ctx.session.campaign;
   if (option === "schedule") {
+    if (!(await canAccessFeature(ctx.business._id, "scheduling"))) {
+      await ctx.editMessageText("Scheduling requires an active Basic or Pro subscription.", { parse_mode: "HTML", ...mainMenuKeyboard() });
+      return;
+    }
     campaign.step = "schedule";
     await ctx.editMessageText(
       "<b>Schedule campaign</b>\n\nSend the date and time in your preferred format.\n\nExample: 2026-12-01 09:30",
@@ -126,7 +132,7 @@ export const saveDraft = async (ctx) => {
   );
 };
 
-export const scheduleCampaign = async (ctx, queue) => {
+export const scheduleCampaign = async (ctx) => {
   const scheduledFor = ctx.session.campaign.scheduledFor
     ? new Date(ctx.session.campaign.scheduledFor)
     : undefined;
@@ -143,16 +149,6 @@ export const scheduleCampaign = async (ctx, queue) => {
     status: "scheduled",
     scheduledFor,
   });
-  await prepareCampaignDeliveries({
-    campaignId: campaign._id,
-    businessId: ctx.business._id,
-  });
-  await enqueueCampaign({
-    queue,
-    campaignId: campaign._id,
-    businessId: ctx.business._id,
-    scheduledFor,
-  });
   delete ctx.session.campaign;
   await ctx.answerCbQuery("Campaign scheduled");
   await ctx.editMessageText(
@@ -161,25 +157,31 @@ export const scheduleCampaign = async (ctx, queue) => {
   );
 };
 
-export const sendCampaign = async (ctx, queue) => {
+export const sendCampaign = async (ctx, botProvider) => {
+  let provider = botProvider;
+  let personalClient;
+  if (ctx.session.campaign.method === "Premium Personal Account") {
+    const connection = await getPersonalProvider(ctx.business._id);
+    personalClient = connection.client;
+    provider = new TelegramUserProvider(personalClient);
+  }
   const campaign = await createCampaign({
     businessId: ctx.business._id,
     input: ctx.session.campaign,
     status: "draft",
   });
-  await prepareCampaignDeliveries({
+  const result = await executeCampaign({
     campaignId: campaign._id,
     businessId: ctx.business._id,
+    provider,
   });
-  await enqueueCampaign({
-    queue,
-    campaignId: campaign._id,
-    businessId: ctx.business._id,
-  });
+  if (personalClient) await personalClient.disconnect();
+  const successful = result.results.filter((item) => item.status === "sent").length;
+  const failed = result.results.length - successful;
   delete ctx.session.campaign;
-  await ctx.answerCbQuery("Campaign queued");
+  await ctx.answerCbQuery("Delivery complete");
   await ctx.editMessageText(
-    `<b>Campaign queued</b>\n\nCampaign: ${campaign.name}\nStatus: Active processing\n\nDelivery results will be recorded as Telegram responses arrive.`,
+    `<b>Campaign result</b>\n\nCampaign: ${campaign.name}\nTotal attempted: ${result.results.length}\nSuccessful deliveries: ${successful}\nFailed deliveries: ${failed}\nStatus: ${result.campaign.status}`,
     { parse_mode: "HTML", ...mainMenuKeyboard() },
   );
 };

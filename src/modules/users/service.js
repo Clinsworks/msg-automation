@@ -32,3 +32,6 @@ export const ensureUserWorkspace = async (telegramUser) => {
 
   return { user, business };
 };
+
+export const updateUserEmail = (userId, email) =>
+  User.findByIdAndUpdate(userId, { $set: { email: email.toLowerCase().trim() } }, { new: true });

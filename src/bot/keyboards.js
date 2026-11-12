@@ -14,6 +14,14 @@ export const backMenuKeyboard = (back = "nav:main") => Markup.inlineKeyboard([
   [button("Back", back), button("Main Menu", "nav:main")]
 ]);
 
+export const subscriptionKeyboard = (plans = []) => Markup.inlineKeyboard([
+  ...plans.filter((plan) => plan.price > 0).map((plan) => [
+    button(`${plan.name} - ₦${plan.price.toLocaleString()}`, `subscription:buy:${plan._id}`)
+  ]),
+  [button("View Plans", "subscription:plans")],
+  [button("Payment History", "subscription:history"), button("Main Menu", "nav:main")]
+]);
+
 export const audienceKeyboard = () => Markup.inlineKeyboard([
   [button("All Recipients", "audience:list:all")],
   [button("Individual Contacts", "audience:list:user")],

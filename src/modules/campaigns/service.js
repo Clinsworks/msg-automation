@@ -46,7 +46,7 @@ export const createCampaign = async ({ businessId, input, status = "draft", sche
 export const executeCampaign = async ({ campaignId, businessId, provider }) => {
   const campaign = await Campaign.findOne({ _id: campaignId, business: businessId }).populate("recipients");
   if (!campaign) throw new Error("Campaign not found.");
-  if (campaign.sendingMethod !== "standard_bot") throw new Error("This campaign requires a personal Telegram provider.");
+  if (!provider) throw new Error("A messaging provider is required.");
   if (!campaign.recipients.length) throw new Error("Campaign has no recipients.");
 
   campaign.status = "active";
@@ -57,7 +57,7 @@ export const executeCampaign = async ({ campaignId, businessId, provider }) => {
     const delivery = await CampaignDelivery.create({
       campaign: campaign._id,
       recipient: recipient._id,
-      sendingProvider: providerName,
+      sendingProvider: campaign.sendingMethod === "personal_account" ? "telegram_user" : providerName,
       status: "pending",
       attemptCount: 1
     });
