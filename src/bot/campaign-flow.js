@@ -10,10 +10,10 @@ import {
   executeCampaign,
   findEligibleRecipients,
 } from "../modules/campaigns/service.js";
-import { canAccessFeature } from "../modules/subscriptions/service.js";
 import { getPersonalProvider } from "../modules/telegram/connection-service.js";
 import { TelegramUserProvider } from "../modules/telegram/user-provider.js";
 import { Audience } from "../database/models.js";
+import { isSuperadmin } from "./auth-flow.js";
 
 const flowMessage = (ctx, text, keyboard) =>
   ctx.reply(text, { parse_mode: "HTML", ...keyboard });
@@ -29,7 +29,7 @@ export const startCampaign = async (ctx) => {
 
 export const handleCampaignText = async (ctx) => {
   const campaign = ctx.session.campaign;
-  if (!campaign || !["name", "message", "schedule"].includes(campaign.step))
+  if (!campaign || !["name", "message", "button", "schedule"].includes(campaign.step))
     return false;
 
   if (campaign.step === "name") {
@@ -42,6 +42,10 @@ export const handleCampaignText = async (ctx) => {
     );
   } else if (campaign.step === "message") {
     campaign.message = ctx.message.text;
+    campaign.step = "button";
+    await flowMessage(ctx, "<b>Campaign</b>\n\nWhat should the order button say? Send a label such as <i>Order now</i>, or send <i>none</i> to send without a button.", {});
+  } else if (campaign.step === "button") {
+    campaign.orderButtonLabel = /^none$/i.test(ctx.message.text.trim()) ? undefined : ctx.message.text.trim();
     campaign.step = "method";
     await flowMessage(
       ctx,
@@ -125,10 +129,6 @@ export const showDelivery = async (ctx) => {
 export const chooseDelivery = async (ctx, option) => {
   const campaign = ctx.session.campaign;
   if (option === "schedule") {
-    if (!(await canAccessFeature(ctx.business._id, "scheduling"))) {
-      await ctx.editMessageText("Scheduling requires an active Basic or Pro subscription.", { parse_mode: "HTML", ...mainMenuKeyboard() });
-      return;
-    }
     campaign.step = "schedule";
     await ctx.editMessageText(
       "<b>Schedule campaign</b>\n\nSend the date and time in your preferred format.\n\nExample: 2026-12-01 09:30",

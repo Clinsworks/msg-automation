@@ -59,10 +59,19 @@ export const handleSuperadminPassword = async (ctx) => {
   }
   delete ctx.session.superadminAuth;
   ctx.session.superadminUnlocked = true;
-  await ctx.reply("Superadmin access granted.");
+  await ctx.reply("Superadmin access granted. All platform features are enabled for this session.", {
+    ...mainMenuKeyboard(),
+  });
   return true;
 };
 
+export const isSuperadmin = (ctx) => ctx.session?.superadminUnlocked === true;
+
+export const startPasswordChange = async (ctx) => {
+  ctx.session.passwordChange = { step: "new" };
+  await ctx.answerCbQuery();
+  await ctx.reply("Send the new admin password. It must be at least 8 characters.");
+};
 
 const getPasswordHash = async (businessId) => {
   const business = await Business.findById(businessId).select("+adminPasswordHash").lean();

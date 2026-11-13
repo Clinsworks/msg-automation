@@ -58,6 +58,7 @@ const campaignSchema = new Schema({
   sendingMethod: { type: String, enum: ["standard_bot", "personal_account"], required: true },
   recipients: [{ type: objectId(), ref: "Recipient" }],
   audiences: [{ type: objectId(), ref: "Audience" }],
+  orderButtonLabel: { type: String, trim: true, maxlength: 64 },
   scheduledFor: Date,
   status: { type: String, enum: ["draft", "active", "scheduled", "completed", "failed", "cancelled"], default: "draft", index: true }
 }, timestamps);
@@ -79,6 +80,69 @@ const templateSchema = new Schema({
   name: { type: String, required: true, trim: true },
   content: { type: String, required: true },
   media: { type: Schema.Types.Mixed }
+}, timestamps);
+
+const productSchema = new Schema({
+  business: { type: objectId(), ref: "Business", required: true, index: true },
+  name: { type: String, required: true, trim: true, maxlength: 160 },
+  description: { type: String, trim: true, maxlength: 1000 },
+  price: { type: Number, required: true, min: 0 },
+  stock: { type: Number, min: 0 },
+  active: { type: Boolean, default: true, index: true }
+}, timestamps);
+
+const paymentDetailsSchema = new Schema({
+  business: { type: objectId(), ref: "Business", required: true, unique: true },
+  bankName: { type: String, trim: true },
+  accountName: { type: String, trim: true },
+  accountNumber: { type: String, trim: true },
+  paymentReference: { type: String, trim: true }
+}, timestamps);
+
+const orderSchema = new Schema({
+  business: { type: objectId(), ref: "Business", required: true, index: true },
+  customerTelegramUserId: { type: String, required: true, index: true },
+  customerName: { type: String, trim: true },
+  product: { type: objectId(), ref: "Product", required: true },
+  receiptFileId: { type: String },
+  receiptText: { type: String, trim: true },
+  status: { type: String, enum: ["awaiting_receipt", "pending_approval", "approved", "rejected"], default: "awaiting_receipt", index: true }
+}, timestamps);
+
+const staffSchema = new Schema({
+  business: { type: objectId(), ref: "Business", required: true, index: true },
+  telegramUserId: { type: String, required: true, index: true },
+  displayName: { type: String, trim: true },
+  role: { type: String, enum: ["manager", "marketer", "support"], default: "support" },
+  status: { type: String, enum: ["active", "revoked"], default: "active", index: true }
+}, timestamps);
+staffSchema.index({ business: 1, telegramUserId: 1 }, { unique: true });
+
+const crossPostRuleSchema = new Schema({
+  business: { type: objectId(), ref: "Business", required: true, index: true },
+  sourceChatId: { type: String, required: true },
+  destinationRecipients: [{ type: objectId(), ref: "Recipient" }],
+  mode: { type: String, enum: ["copy", "forward"], default: "copy" },
+  active: { type: Boolean, default: true, index: true }
+}, timestamps);
+crossPostRuleSchema.index({ business: 1, sourceChatId: 1 }, { unique: true });
+
+const botInteractionSchema = new Schema({
+  business: { type: objectId(), ref: "Business", required: true, index: true },
+  telegramUserId: { type: String, required: true, index: true },
+  displayName: { type: String, trim: true },
+  lastInteractionAt: { type: Date, required: true, index: true },
+  optedOut: { type: Boolean, default: false }
+}, timestamps);
+botInteractionSchema.index({ business: 1, telegramUserId: 1 }, { unique: true });
+
+const winbackCampaignSchema = new Schema({
+  business: { type: objectId(), ref: "Business", required: true, index: true },
+  message: { type: String, required: true },
+  buttonLabel: { type: String, trim: true },
+  inactiveDays: { type: Number, required: true, min: 1, default: 30 },
+  status: { type: String, enum: ["draft", "sent"], default: "draft" },
+  sentCount: { type: Number, default: 0 }
 }, timestamps);
 
 const planSchema = new Schema({
@@ -129,6 +193,13 @@ export const Audience = model("Audience", audienceSchema);
 export const Campaign = model("Campaign", campaignSchema);
 export const CampaignDelivery = model("CampaignDelivery", campaignDeliverySchema);
 export const Template = model("Template", templateSchema);
+export const Product = model("Product", productSchema);
+export const PaymentDetails = model("PaymentDetails", paymentDetailsSchema);
+export const Order = model("Order", orderSchema);
+export const Staff = model("Staff", staffSchema);
+export const CrossPostRule = model("CrossPostRule", crossPostRuleSchema);
+export const BotInteraction = model("BotInteraction", botInteractionSchema);
+export const WinbackCampaign = model("WinbackCampaign", winbackCampaignSchema);
 export const Plan = model("Plan", planSchema);
 export const Subscription = model("Subscription", subscriptionSchema);
 export const Payment = model("Payment", paymentSchema);

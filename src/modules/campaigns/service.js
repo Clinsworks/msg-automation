@@ -38,6 +38,7 @@ export const createCampaign = async ({ businessId, input, status = "draft", sche
     messageContent: input.message,
     sendingMethod: normalizeMethod(input.method),
     recipients: recipients.map(({ _id }) => _id),
+    orderButtonLabel: input.orderButtonLabel,
     scheduledFor,
     status
   });
@@ -72,7 +73,10 @@ export const executeCampaign = async ({ campaignId, businessId, provider }) => {
       continue;
     }
     try {
-      const message = await provider.sendMessage(recipient.telegramDestinationId, campaign.messageContent);
+      const options = campaign.orderButtonLabel
+        ? { reply_markup: { inline_keyboard: [[{ text: campaign.orderButtonLabel, callback_data: `order:catalog:${campaign.business}` }]] } }
+        : {};
+      const message = await provider.sendMessage(recipient.telegramDestinationId, campaign.messageContent, options);
       delivery.status = "sent";
       delivery.telegramMessageId = String(message.message_id);
       delivery.deliveredAt = new Date();

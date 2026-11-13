@@ -1,8 +1,8 @@
 import { Telegraf } from "telegraf";
 import { config } from "../config/env.js";
 import { cancelCampaign, chooseDelivery, handleCampaignText, saveDraft, scheduleCampaign, selectAudience, selectMethod, selectRecipients, sendCampaign, showDelivery, showPreview, startCampaign } from "./campaign-flow.js";
-import { addBotToGroupKeyboard, campaignMethodKeyboard, campaignRecipientsKeyboard, channelSelectionKeyboard, contactSelectionKeyboard, mainMenuKeyboard } from "./keyboards.js";
-import { audiences, analytics, campaigns, campaignAudiences, campaignList, createAudience, dashboard, help, mainMenu, paymentHistory, recipientList, savedAudiences, scheduled, settings, subscription, subscriptionPlans, templates } from "./views.js";
+import { addBotToGroupKeyboard, campaignMethodKeyboard, campaignRecipientsKeyboard, channelSelectionKeyboard, contactSelectionKeyboard, customerProductKeyboard, mainMenuKeyboard, orderReviewKeyboard } from "./keyboards.js";
+import { audiences, analytics, campaigns, campaignAudiences, campaignList, createAudience, dashboard, help, mainMenu, orders, paymentDetails, paymentHistory, products, recipientList, savedAudiences, scheduled, settings, subscription, subscriptionPlans, templates } from "./views.js";
 import { loadConversationState, saveConversationState } from "../modules/conversation-state/service.js";
 import { ensureUserWorkspace } from "../modules/users/service.js";
 import { listRecipients, registerRecipient, removeRecipient } from "../modules/recipients/service.js";
@@ -10,10 +10,14 @@ import { TelegramBotProvider } from "../modules/messaging/providers/telegram-bot
 import { initializePayment } from "../modules/payments/service.js";
 import { updateUserEmail } from "../modules/users/service.js";
 import { getActivePlans } from "../modules/subscriptions/service.js";
-import { canAccessFeature } from "../modules/subscriptions/service.js";
 import { beginConnection, completeConnection, disconnectPersonalAccount } from "../modules/telegram/connection-service.js";
 import { findExpiringSubscription, getSubscriptionNotification } from "../modules/notifications/service.js";
-import { cancelAdminAuth, forgotAdminPassword, guide, handleAdminPassword, handleSuperadminPassword, requestAdminPassword, showAdminPanel, showGuide, startScreen, startSuperadminAuth } from "./auth-flow.js";
+import { BotInteraction, Business, Campaign, Order, PaymentDetails, Product, User } from "../database/models.js";
+import { cancelAdminAuth, forgotAdminPassword, guide, handleAdminPassword, handleSuperadminPassword, isSuperadmin, requestAdminPassword, showAdminPanel, showGuide, startPasswordChange, startScreen, startSuperadminAuth } from "./auth-flow.js";
+import { hashPassword } from "../modules/auth/password.js";
+import { getStaffWorkspace, addStaffMember, listStaff, revokeStaffMember } from "../modules/staff/service.js";
+import { createWinbackCampaign, findWinbackRecipients, recordInteraction } from "../modules/winback/service.js";
+import { processCrossPostMessage, saveCrossPostRule, listCrossPostRules } from "../modules/crossposting/service.js";
 
 const render = async (ctx, view, viewArgument = ctx.from) => {
   const { text, keyboard } = await view(viewArgument);
@@ -40,25 +44,43 @@ export const createBot = () => {
   const provider = new TelegramBotProvider(bot.telegram);
   bot.use(async (ctx, next) => {
     if (!ctx.from) return next();
-    const workspace = await ensureUserWorkspace(ctx.from);
+    const staffWorkspace = await getStaffWorkspace(ctx.from.id);
+    const workspace = staffWorkspace || await ensureUserWorkspace(ctx.from);
     ctx.dbUser = workspace.user;
     ctx.business = workspace.business;
     ctx.session = await loadConversationState(ctx.from.id);
+    if (staffWorkspace) {
+      ctx.session.staffUnlocked = true;
+      ctx.staffMembership = staffWorkspace.staff;
+    }
+    if (ctx.chat?.type === "private") {
+      await recordInteraction({ businessId: ctx.business._id, telegramUserId: ctx.from.id, displayName: ctx.from.first_name });
+    }
     await next();
     await saveConversationState(ctx.from.id, ctx.session);
   });
+  bot.action(/^order:review:(.+)$/, async (ctx) => {
+    const order = await Order.findOne({ _id: ctx.match[1], business: ctx.business._id }).populate("product", "name price");
+    if (!order) { await ctx.answerCbQuery("Order not found"); return; }
+    await ctx.answerCbQuery();
+    await ctx.reply(`Order: ${order.product.name}\nCustomer: ${order.customerName || order.customerTelegramUserId}\nStatus: ${order.status}`, orderReviewKeyboard(order._id));
+  });
 
   bot.use(async (ctx, next) => {
-    if (!ctx.callbackQuery || ctx.session.adminUnlocked || ctx.session.superadminUnlocked) return next();
+    if (!ctx.callbackQuery || ctx.session.adminUnlocked || ctx.session.superadminUnlocked || ctx.session.staffUnlocked) return next();
     const action = ctx.callbackQuery.data || "";
-    if (["start:admin", "start:guide", "auth:forgot", "auth:cancel"].includes(action)) return next();
+    if (
+      ["start:admin", "start:guide", "auth:forgot", "auth:cancel"].includes(action)
+      || action.startsWith("order:start:")
+      || action.startsWith("order:catalog:")
+    ) return next();
     await ctx.answerCbQuery("Open Admin Panel and enter your password first.");
   });
 
   bot.use(async (ctx, next) => {
     const text = ctx.message?.text || "";
     const command = text.match(/^\/([a-z0-9_]+)/i)?.[1]?.toLowerCase();
-    if (!command || ctx.session.adminUnlocked || ctx.session.superadminUnlocked || ["start", "help", "myid", "superadmin"].includes(command)) return next();
+    if (!command || ctx.session.adminUnlocked || ctx.session.superadminUnlocked || ctx.session.staffUnlocked || ["start", "help", "myid", "superadmin"].includes(command)) return next();
     await ctx.reply("Admin access is locked. Use /start and choose Admin Panel.");
   });
 
@@ -96,11 +118,35 @@ export const createBot = () => {
     await render(ctx, mainMenu, ctx);
   });
   bot.command("help", (ctx) => render(ctx, help));
+  bot.command("winbackoptout", async (ctx) => {
+    await recordInteraction({ businessId: ctx.business._id, telegramUserId: ctx.from.id, displayName: ctx.from.first_name });
+    await ctx.reply("You will not receive future win-back messages.");
+    await BotInteraction.updateOne({ business: ctx.business._id, telegramUserId: String(ctx.from.id) }, { $set: { optedOut: true } });
+  });
   bot.command("superadmin", startSuperadminAuth);
   bot.hears("Admin Panel", showAdminPanel);
   bot.hears("Guide", showGuide);
   bot.hears("Support", (ctx) => render(ctx, help));
   bot.hears("Cancel", (ctx) => ctx.reply("Chat selection cancelled."));
+  bot.on("photo", async (ctx, next) => {
+    if (!ctx.session.order) return next();
+    const order = await Order.findById(ctx.session.order.orderId).populate("product", "name");
+    if (!order || String(order.customerTelegramUserId) !== String(ctx.from.id)) {
+      await ctx.reply("This order is no longer available.");
+      return;
+    }
+    order.receiptFileId = ctx.message.photo.at(-1).file_id;
+    order.receiptText = ctx.message.caption || "";
+    order.status = "pending_approval";
+    await order.save();
+    delete ctx.session.order;
+    const business = await Business.findById(order.business).select("owner").lean();
+    const owner = business?.owner ? await User.findById(business.owner).lean() : null;
+    if (owner?.telegramUserId) {
+      await ctx.telegram.sendMessage(owner.telegramUserId, `🧾 New order pending approval\nProduct: ${order.product.name}\nCustomer: ${ctx.from.first_name || ctx.from.id}`, orderReviewKeyboard(order._id));
+    }
+    await ctx.reply("Receipt received. The seller will review your order and notify you.");
+  });
   bot.on("message", async (ctx, next) => {
     const sharedUsers = ctx.message?.users_shared?.user_ids || [];
     if (sharedUsers.length) {
@@ -116,17 +162,165 @@ export const createBot = () => {
       return;
     }
     const shared = ctx.message?.chat_shared;
-    if (!shared) return next();
-    try {
-      const recipient = await registerRecipient({ businessId: ctx.business._id, destinationId: shared.chat_id, provider });
-      await ctx.reply(`Recipient saved: ${recipient.displayName}\nType: ${recipient.destinationType}`, { reply_markup: { remove_keyboard: true } });
-    } catch (error) {
-      await ctx.reply(error.code === "INELIGIBLE_DESTINATION" ? error.message : "Unable to add the selected chat.");
+    if (shared) {
+      try {
+        const recipient = await registerRecipient({ businessId: ctx.business._id, destinationId: shared.chat_id, provider });
+        await ctx.reply(`Recipient saved: ${recipient.displayName}\nType: ${recipient.destinationType}`, { reply_markup: { remove_keyboard: true } });
+      } catch (error) {
+        await ctx.reply(error.code === "INELIGIBLE_DESTINATION" ? error.message : "Unable to add the selected chat.");
+      }
+      return;
     }
+    if (ctx.chat?.type === "group" || ctx.chat?.type === "supergroup" || ctx.chat?.type === "channel") {
+      const text = ctx.message?.text || ctx.message?.caption;
+      if (text) await processCrossPostMessage({ businessId: ctx.business._id, sourceChatId: ctx.chat.id, text, provider });
+    }
+    return next();
   });
   bot.on("text", async (ctx, next) => {
     if (await handleSuperadminPassword(ctx)) return;
     if (await handleAdminPassword(ctx)) return;
+    if (ctx.session.product) {
+      const product = ctx.session.product;
+      if (product.step === "name") {
+        product.name = ctx.message.text.trim();
+        product.step = "description";
+        await ctx.reply("Send the product description.");
+      } else if (product.step === "description") {
+        product.description = ctx.message.text.trim();
+        product.step = "price";
+        await ctx.reply("Send the product price in naira.");
+      } else if (product.step === "price") {
+        const price = Number(ctx.message.text.trim());
+        if (!Number.isFinite(price) || price < 0) { await ctx.reply("Send a valid non-negative price."); return; }
+        product.price = price;
+        product.step = "stock";
+        await ctx.reply("Send the stock quantity, or type unlimited.");
+      } else if (product.step === "stock") {
+        const stock = /^unlimited$/i.test(ctx.message.text.trim()) ? undefined : Number(ctx.message.text.trim());
+        if (stock !== undefined && (!Number.isInteger(stock) || stock < 0)) { await ctx.reply("Send a whole-number stock quantity or unlimited."); return; }
+        await Product.create({ business: ctx.business._id, name: product.name, description: product.description, price: product.price, stock });
+        delete ctx.session.product;
+        await ctx.reply("Product saved.", mainMenuKeyboard());
+      }
+      return;
+    }
+    if (ctx.session.paymentDetails) {
+      const details = ctx.session.paymentDetails;
+      const value = ctx.message.text.trim();
+      if (details.step === "bankName") {
+        details.bankName = value;
+        details.step = "accountName";
+        await ctx.reply("Send the account name.");
+      } else if (details.step === "accountName") {
+        details.accountName = value;
+        details.step = "accountNumber";
+        await ctx.reply("Send the account number.");
+      } else if (details.step === "accountNumber") {
+        details.accountNumber = value;
+        details.step = "paymentReference";
+        await ctx.reply("Send the payment instructions or reference.");
+      } else {
+        details.paymentReference = value;
+        await PaymentDetails.findOneAndUpdate(
+          { business: ctx.business._id },
+          { $set: details },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+        delete ctx.session.paymentDetails;
+        await ctx.reply("Payment details saved.", mainMenuKeyboard());
+      }
+      return;
+    }
+    if (ctx.session.staffInvite) {
+      const invite = ctx.session.staffInvite;
+      if (invite.step === "telegramUserId") {
+        if (!/^\d+$/.test(ctx.message.text.trim())) {
+          await ctx.reply("Send a numeric Telegram user ID.");
+          return;
+        }
+        invite.telegramUserId = ctx.message.text.trim();
+        invite.step = "role";
+        await ctx.reply("Send the role: manager, marketer, or support.");
+      } else {
+        const role = ctx.message.text.trim().toLowerCase();
+        if (!["manager", "marketer", "support"].includes(role)) {
+          await ctx.reply("Role must be manager, marketer, or support.");
+          return;
+        }
+        await addStaffMember({ businessId: ctx.business._id, telegramUserId: invite.telegramUserId, role, displayName: invite.telegramUserId });
+        delete ctx.session.staffInvite;
+        await ctx.reply("Staff member added. They can use /start and access this business workspace.");
+      }
+      return;
+    }
+    if (ctx.session.winback) {
+      const winback = ctx.session.winback;
+      if (winback.step === "message") {
+        winback.message = ctx.message.text.trim();
+        winback.step = "button";
+        await ctx.reply("Send the button label, or send none.");
+      } else if (winback.step === "button") {
+        winback.buttonLabel = /^none$/i.test(ctx.message.text.trim()) ? undefined : ctx.message.text.trim();
+        winback.step = "inactiveDays";
+        await ctx.reply("How many inactive days should qualify a customer? Send a whole number.");
+      } else {
+        const inactiveDays = Number(ctx.message.text.trim());
+        if (!Number.isInteger(inactiveDays) || inactiveDays < 1) {
+          await ctx.reply("Send a whole number of at least 1.");
+          return;
+        }
+        const recipients = await findWinbackRecipients(ctx.business._id, inactiveDays);
+        for (const recipient of recipients) {
+          const options = winback.buttonLabel
+            ? { reply_markup: { inline_keyboard: [[{ text: winback.buttonLabel, callback_data: `order:catalog:${ctx.business._id}` }]] } }
+            : {};
+          await provider.sendMessage(recipient.telegramUserId, winback.message, options);
+        }
+        await createWinbackCampaign({ business: ctx.business._id, message: winback.message, buttonLabel: winback.buttonLabel, inactiveDays, status: "sent", sentCount: recipients.length });
+        delete ctx.session.winback;
+        await ctx.reply(`Win-back message sent to ${recipients.length} eligible customer(s).`, mainMenuKeyboard());
+      }
+      return;
+    }
+    if (ctx.session.crossPost) {
+      const crossPost = ctx.session.crossPost;
+      if (crossPost.step === "sourceChatId") {
+        crossPost.sourceChatId = ctx.message.text.trim();
+        crossPost.step = "destinations";
+        await ctx.reply("Send recipient record IDs separated by commas.");
+      } else {
+        const destinationIds = ctx.message.text.split(",").map((value) => value.trim()).filter(Boolean);
+        await saveCrossPostRule({ businessId: ctx.business._id, sourceChatId: crossPost.sourceChatId, destinationIds, mode: "copy" });
+        delete ctx.session.crossPost;
+        await ctx.reply("Cross-post rule saved. New messages from that source will be copied to the selected destinations.", mainMenuKeyboard());
+      }
+      return;
+    }
+    if (ctx.session.passwordChange) {
+      const passwordChange = ctx.session.passwordChange;
+      if (passwordChange.step === "new") {
+        if (ctx.message.text.length < 8) {
+          await ctx.reply("Password must be at least 8 characters.");
+          return;
+        }
+        passwordChange.password = ctx.message.text;
+        passwordChange.step = "confirm";
+        await ctx.reply("Send the new password again to confirm it.");
+      } else if (passwordChange.password !== ctx.message.text) {
+        delete ctx.session.passwordChange;
+        await ctx.reply("Passwords did not match. Start again from Change password.");
+      } else {
+        const business = await Business.findById(ctx.business._id).select("+adminPasswordHash");
+        if (!business) throw new Error("Business was not found.");
+        business.adminPasswordHash = await hashPassword(passwordChange.password);
+        business.adminPasswordChangedAt = new Date();
+        await business.save();
+        delete ctx.session.passwordChange;
+        await ctx.reply("Admin password changed successfully.", mainMenuKeyboard());
+      }
+      return;
+    }
     if (!(await handleCampaignText(ctx))) await next();
   });
   bot.command("setemail", async (ctx) => {
@@ -145,10 +339,6 @@ export const createBot = () => {
       return;
     }
     try {
-      if (!(await canAccessFeature(ctx.business._id, "personal_telegram"))) {
-        await ctx.reply("An active Pro subscription is required before connecting a personal Telegram account.");
-        return;
-      }
       await beginConnection({ businessId: ctx.business._id, phoneNumber });
       ctx.session.telegramAuth = { step: "code" };
       await ctx.reply("Telegram sent a verification code. Reply with /telegramcode <code>. Never share this code with anyone.");
@@ -214,6 +404,91 @@ export const createBot = () => {
   bot.action("auth:cancel", cancelAdminAuth);
 
   bot.action("nav:main", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, mainMenu, ctx); });
+  bot.action("product:list", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, products, ctx); });
+  bot.action("product:add", async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.product = { step: "name" };
+    await ctx.reply("Send the product name.");
+  });
+  bot.action("order:pending", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, () => orders(ctx, "pending_approval"), ctx); });
+  bot.action("order:approved", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, () => orders(ctx, "approved"), ctx); });
+  bot.action("payment:details", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, () => paymentDetails(ctx), ctx); });
+  bot.action("payment:edit", async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.paymentDetails = { step: "bankName" };
+    await ctx.reply("Send the bank name.");
+  });
+  bot.action("crosspost:menu", async (ctx) => {
+    await ctx.answerCbQuery();
+    const rules = await listCrossPostRules(ctx.business._id);
+    await ctx.reply(
+      rules.length
+        ? `📣 Cross-post rules\n\n${rules.map((rule) => `• ${rule.sourceChatId} → ${rule.destinationRecipients.length} destination(s) (${rule.active ? "active" : "paused"})`).join("\n")}`
+        : "📣 No cross-post rules configured.",
+      { reply_markup: { inline_keyboard: [[{ text: "Create rule", callback_data: "crosspost:create" }], [{ text: "Main Menu", callback_data: "nav:main" }]] } },
+    );
+  });
+  bot.action("crosspost:create", async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.crossPost = { step: "sourceChatId" };
+    await ctx.reply("Send the source Telegram chat ID. The bot must be a member of that chat.");
+  });
+  bot.action("winback:menu", async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.winback = { step: "message" };
+    await ctx.reply("Send the win-back message. Only users who interacted with this bot and have been inactive will be contacted.");
+  });
+  bot.action("settings:staff", async (ctx) => {
+    if (ctx.staffMembership) {
+      await ctx.answerCbQuery("Only the business owner can manage staff.", { show_alert: true });
+      return;
+    }
+    const staff = await listStaff(ctx.business._id);
+    await ctx.answerCbQuery();
+    ctx.session.staffInvite = { step: "telegramUserId" };
+    await ctx.reply(`${staff.length ? `Current active staff: ${staff.map((item) => `${item.displayName || item.telegramUserId} (${item.role})`).join(", ")}\n\n` : ""}Send the Telegram user ID to add, or use /staffremove <id> to revoke access.`);
+  });
+  bot.command("staffremove", async (ctx) => {
+    if (ctx.staffMembership) { await ctx.reply("Only the business owner can manage staff."); return; }
+    const telegramUserId = ctx.message.text.split(/\s+/)[1];
+    if (!telegramUserId) { await ctx.reply("Usage: /staffremove <telegram_user_id>"); return; }
+    await revokeStaffMember(ctx.business._id, telegramUserId);
+    await ctx.reply("Staff access revoked.");
+  });
+  bot.action("settings:password", startPasswordChange);
+  bot.action("auth:lock", async (ctx) => { delete ctx.session.adminUnlocked; delete ctx.session.superadminUnlocked; await ctx.answerCbQuery("Panel locked"); await ctx.reply("Admin panel locked. Use Admin Panel to unlock it again."); });
+  bot.action(/^order:start:(.+)$/, async (ctx) => {
+    const product = await Product.findById(ctx.match[1]).lean();
+    if (!product?.active) { await ctx.answerCbQuery("Product unavailable"); return; }
+    const details = await PaymentDetails.findOne({ business: product.business }).lean();
+    const order = await Order.create({ business: product.business, customerTelegramUserId: String(ctx.from.id), customerName: ctx.from.first_name, product: product._id });
+    ctx.session.order = { orderId: String(order._id) };
+    await ctx.answerCbQuery("Order started");
+    await ctx.reply(`🛒 <b>${product.name}</b>\nPrice: ₦${product.price.toLocaleString()}\n\nPay using:\nBank: ${details?.bankName || "Not configured"}\nAccount name: ${details?.accountName || "Not configured"}\nAccount number: ${details?.accountNumber || "Not configured"}\nReference: ${details?.paymentReference || "Include your product name"}\n\nSend your payment receipt as a photo with the product name in the caption.`, { parse_mode: "HTML" });
+  });
+  bot.action(/^order:catalog:(.+)$/, async (ctx) => {
+    const items = await Product.find({ business: ctx.match[1], active: true }).sort({ createdAt: -1 }).limit(50).lean();
+    await ctx.answerCbQuery();
+    if (!items.length) {
+      await ctx.reply("No products are currently available.");
+      return;
+    }
+    await ctx.reply(`<b>Choose a product</b>\n\n${items.map((item) => `• ${item.name} — ₦${item.price.toLocaleString()}\n${item.description || ""}`).join("\n\n")}`, {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: items.map((item) => [{ text: `🛒 ${item.name}`, callback_data: `order:start:${item._id}` }]),
+      },
+    });
+  });
+  bot.action(/^order:(approve|reject):(.+)$/, async (ctx) => {
+    const order = await Order.findOne({ _id: ctx.match[2], business: ctx.business._id }).populate("product", "name");
+    if (!order || order.status !== "pending_approval") { await ctx.answerCbQuery("Order is no longer pending"); return; }
+    order.status = ctx.match[1] === "approve" ? "approved" : "rejected";
+    await order.save();
+    await ctx.answerCbQuery(order.status === "approved" ? "Approved" : "Rejected");
+    await ctx.telegram.sendMessage(order.customerTelegramUserId, `Your order for ${order.product.name} was ${order.status}.`);
+    await ctx.editMessageText(`Order for ${order.product.name}: ${order.status}.`);
+  });
   bot.action("nav:dashboard", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, dashboard, ctx); });
   bot.action("nav:campaigns", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, campaigns); });
   bot.action("nav:audience", async (ctx) => { await ctx.answerCbQuery(); await render(ctx, audiences); });
@@ -257,10 +532,6 @@ export const createBot = () => {
   bot.action("campaign:method:standard", async (ctx) => { await ctx.answerCbQuery(); await selectMethod(ctx, "Standard Bot"); });
   bot.action("campaign:method:premium", async (ctx) => {
     await ctx.answerCbQuery();
-    if (!(await canAccessFeature(ctx.business._id, "personal_telegram"))) {
-      await ctx.editMessageText("<b>Premium sending</b>\n\nAn active Pro subscription is required for personal Telegram sending.", { parse_mode: "HTML", ...mainMenuKeyboard() });
-      return;
-    }
     ctx.session.campaign.method = "Premium Personal Account";
     await ctx.editMessageText("<b>Premium sending</b>\n\nYour Pro entitlement is active. A connected personal Telegram account is required before sending.", { parse_mode: "HTML", ...campaignRecipientsKeyboard() });
   });
@@ -327,6 +598,14 @@ export const createBot = () => {
     await render(ctx, createAudience, ctx);
     await ctx.reply("Select the user contacts you want to add.", contactSelectionKeyboard());
   });
-  bot.catch((error) => console.error("Telegram bot error:", error));
+  bot.catch(async (error, ctx) => {
+    console.error("Telegram bot error:", error);
+    try {
+      if (ctx?.callbackQuery) await ctx.answerCbQuery("Something went wrong");
+      if (ctx?.chat) await ctx.reply("Something went wrong while processing that action. Please try again.");
+    } catch (notificationError) {
+      console.error("Telegram error notification failed:", notificationError);
+    }
+  });
   return bot;
 };

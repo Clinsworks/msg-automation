@@ -3,8 +3,12 @@ import { StringSession } from "telegram/sessions/index.js";
 import { TelegramConnection } from "../../database/models.js";
 import { config } from "../../config/env.js";
 import { decryptSession, encryptSession } from "./session-crypto.js";
+import { NewMessage } from "telegram/events/index.js";
+import { TelegramUserProvider } from "./user-provider.js";
+import { processCrossPostMessage } from "../crossposting/service.js";
 
 const pending = new Map();
+const monitored = new Map();
 
 const requireConfig = () => {
   if (!Number.isInteger(config.telegramApiId) || !config.telegramApiHash) {
@@ -67,11 +71,26 @@ export const completeConnection = async ({ businessId, phoneCode }) => {
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
-    await attempt.client.disconnect();
+    await startPersonalMonitoring({ businessId, client: attempt.client });
     return { accountIdentifier: String(user.id), username: user.username };
   } finally {
     pending.delete(key);
   }
+};
+
+export const startPersonalMonitoring = async ({ businessId, client }) => {
+  const key = String(businessId);
+  if (monitored.has(key)) return monitored.get(key);
+  const handler = async (event) => {
+    const text = event.message?.message;
+    const sourceChatId = event.chatId?.toString?.() || event.message?.chatId?.toString?.();
+    if (!text || !sourceChatId) return;
+    const provider = new TelegramUserProvider(client);
+    await processCrossPostMessage({ businessId, sourceChatId, text, provider });
+  };
+  client.addEventHandler(handler, new NewMessage({ incoming: true }));
+  monitored.set(key, { client, handler });
+  return client;
 };
 
 export const disconnectPersonalAccount = async (businessId) => {
@@ -80,6 +99,12 @@ export const disconnectPersonalAccount = async (businessId) => {
     { $set: { status: "disconnected", encryptedSession: null } }
   );
   pending.delete(String(businessId));
+  const active = monitored.get(String(businessId));
+  if (active) {
+    active.client.removeEventHandler(active.handler);
+    await active.client.disconnect();
+    monitored.delete(String(businessId));
+  }
 };
 
 export const getPersonalProvider = async (businessId) => {
@@ -92,4 +117,13 @@ export const getPersonalProvider = async (businessId) => {
   const client = createClient(decryptSession(connection.encryptedSession));
   await client.connect();
   return { client, connection };
+};
+
+export const restorePersonalMonitoring = async () => {
+  const connections = await TelegramConnection.find({ connectionType: "personal", status: "connected" }).select("+encryptedSession");
+  for (const connection of connections) {
+    const client = createClient(decryptSession(connection.encryptedSession));
+    await client.connect();
+    await startPersonalMonitoring({ businessId: connection.business, client });
+  }
 };

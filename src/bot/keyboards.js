@@ -3,11 +3,17 @@ import { Markup } from "telegraf";
 const button = (label, action) => Markup.button.callback(label, action);
 
 export const mainMenuKeyboard = () => Markup.inlineKeyboard([
-  [button("Dashboard", "nav:dashboard"), button("Campaigns", "nav:campaigns")],
-  [button("Audience", "nav:audience"), button("Scheduled Messages", "nav:scheduled")],
-  [button("Templates", "nav:templates"), button("Analytics", "nav:analytics")],
-  [button("Subscription", "nav:subscription"), button("Settings", "nav:settings")],
-  [button("Help & Support", "nav:help")]
+  [button("📊 Stats", "nav:dashboard"), button("📦 Products", "product:list")],
+  [button("🧾 Pending approvals", "order:pending")],
+  [button("📦 Approved orders", "order:approved")],
+  [button("💳 Payment details", "payment:details")],
+  [button("📞 Customer service", "nav:help")],
+  [button("👥 Staff access", "settings:staff")],
+  [button("📣 Cross-posting", "crosspost:menu")],
+  [button("💌 Win-back", "winback:menu")],
+  [button("⭐ Subscription", "nav:subscription")],
+  [button("🔑 Change password", "settings:password"), button("🔒 Lock", "auth:lock")],
+  [button("📖 Guide", "start:guide")]
 ]);
 
 export const startKeyboard = () => Markup.inlineKeyboard([
@@ -30,6 +36,20 @@ export const adminAuthKeyboard = () => Markup.inlineKeyboard([
 
 export const backMenuKeyboard = (back = "nav:main") => Markup.inlineKeyboard([
   [button("Back", back), button("Main Menu", "nav:main")]
+]);
+
+export const productsKeyboard = () => Markup.inlineKeyboard([
+  [button("➕ Add product", "product:add")],
+  [button("💳 Edit payment details", "payment:edit")],
+  [button("Back to panel", "nav:main")],
+]);
+
+export const orderReviewKeyboard = (orderId) => Markup.inlineKeyboard([
+  [button("✅ Approve", `order:approve:${orderId}`), button("❌ Reject", `order:reject:${orderId}`)],
+]);
+
+export const customerProductKeyboard = (productId) => Markup.inlineKeyboard([
+  [button("🛒 Order", `order:start:${productId}`)],
 ]);
 
 export const subscriptionKeyboard = (plans = []) => Markup.inlineKeyboard([

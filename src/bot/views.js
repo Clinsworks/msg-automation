@@ -1,4 +1,4 @@
-import { getWorkspace } from "../mocks/workspace.js";
+import { Markup } from "telegraf";
 import {
   backMenuKeyboard,
   campaignsKeyboard,
@@ -9,31 +9,55 @@ import {
   paginationKeyboard,
   subscriptionKeyboard,
   analyticsKeyboard,
+  productsKeyboard,
 } from "./keyboards.js";
 import { listCampaigns } from "../modules/campaigns/service.js";
 import { getActivePlans, getBusinessSubscription, getPaymentHistory } from "../modules/subscriptions/service.js";
 import { getBusinessAnalytics, getDashboardStats } from "../modules/analytics/service.js";
-import { Audience, Campaign, Recipient, Template } from "../database/models.js";
+import { Audience, Campaign, Order, PaymentDetails, Product, Recipient, Template } from "../database/models.js";
 
 export const mainMenu = async (ctx) => {
-  const workspace = getWorkspace(ctx.from);
-  const [stats, current] = await Promise.all([
-    getDashboardStats(ctx.business._id),
-    getBusinessSubscription(ctx.business._id),
-  ]);
+  const current = await getBusinessSubscription(ctx.business._id);
   const plan = current?.plan?.name || "Free";
   const status = current?.expiresAt > new Date() ? current.status : "expired";
   return {
-    text: `WELCOME BACK, ${ctx.from?.first_name || "there"}!\n\nBusiness: ${workspace.businessName}\n\nHere's an overview of your messaging workspace.\n\n<b>Dashboard statistics</b>\n• Campaigns: ${stats.campaigns}\n• Messages attempted: ${stats.attempted}\n• Successful deliveries: ${stats.successful}\n• Failed deliveries: ${stats.failed}\n• Subscription: ${plan} (${status})`,
+    text: `🔓 <b>Unlocked</b>\n\nBusiness: ${ctx.business.name}\nPlan: ${plan} (${status})\n\nUse the controls below to manage products, orders, cross-posting, win-back messages, and payments.`,
     keyboard: mainMenuKeyboard(),
   };
 };
 
+export const products = async (ctx) => {
+    const items = await Product.find({ business: ctx.business._id, active: true }).sort({ createdAt: -1 }).limit(50).lean();
+    return {
+      text: `<b>📦 Products</b>\n\n${items.length ? items.map((item) => `• ${item.name} — ₦${item.price.toLocaleString()}${item.stock === undefined ? "" : ` (${item.stock} in stock)`}\n  ${item.description || ""}`).join("\n") : "No products configured yet."}`,
+      keyboard: productsKeyboard(),
+    };
+};
+
+export const orders = async (ctx, status) => {
+    const items = await Order.find({ business: ctx.business._id, status }).populate("product", "name price").sort({ createdAt: -1 }).limit(30).lean();
+    return {
+      text: `<b>${status === "pending_approval" ? "🧾 Pending approvals" : "📦 Approved orders"}</b>\n\n${items.length ? items.map((item) => `• ${item.customerName || item.customerTelegramUserId} — ${item.product?.name || "Product"} — ${item.status}`).join("\n") : "No orders found."}`,
+      keyboard: Markup.inlineKeyboard([
+        ...items.map((item) => [{ text: `Review ${item.product?.name || "order"}`, callback_data: `order:review:${item._id}` }]),
+        [{ text: "Back to panel", callback_data: "nav:main" }],
+      ]),
+    };
+};
+
+export const paymentDetails = async (ctx) => {
+    const details = await PaymentDetails.findOne({ business: ctx.business._id }).lean();
+    return {
+      text: `<b>💳 Payment details</b>\n\n${details ? `Bank: ${details.bankName || "—"}\nAccount name: ${details.accountName || "—"}\nAccount number: ${details.accountNumber || "—"}\nInstructions: ${details.paymentReference || "—"}` : "No payment details configured."}`,
+      keyboard: backMenuKeyboard(),
+    };
+};
+
 export const dashboard = async (ctx) => {
-  const workspace = getWorkspace(ctx.from);
   const stats = await getDashboardStats(ctx.business._id);
+  const current = await getBusinessSubscription(ctx.business._id);
   return {
-    text: `<b>Dashboard</b>\n\nBusiness: ${workspace.businessName}\nAccount status: Active\nPlan: ${workspace.plan.name}\nCampaigns: ${stats.campaigns}\nMessages attempted: ${stats.attempted}\nSuccessful deliveries: ${stats.successful}\nFailed deliveries: ${stats.failed}\n\nUpcoming scheduled campaigns: ${stats.upcoming}`,
+    text: `<b>Dashboard</b>\n\nBusiness: ${ctx.business.name}\nAccount status: ${ctx.business.status}\nPlan: ${current?.plan?.name || "Free"}\nCampaigns: ${stats.campaigns}\nMessages attempted: ${stats.attempted}\nSuccessful deliveries: ${stats.successful}\nFailed deliveries: ${stats.failed}\n\nUpcoming scheduled campaigns: ${stats.upcoming}`,
     keyboard: dashboardKeyboard(),
   };
 };

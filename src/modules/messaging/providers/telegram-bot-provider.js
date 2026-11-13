@@ -58,16 +58,16 @@ export class TelegramBotProvider {
 
     const bot = await this.telegram.getMe();
     const membership = await this.telegram.getChatMember(chat.id, bot.id);
-    const allowedStatuses = ["administrator", "creator"];
     if (chat.type === "channel") {
       return {
-        allowed: allowedStatuses.includes(membership.status) && membership.can_post_messages === true,
+        allowed: ["administrator", "creator"].includes(membership.status) && membership.can_post_messages === true,
         reason: "The bot must be an administrator with permission to post in this channel."
       };
     }
 
     return {
-      allowed: membership.status === "creator" || allowedStatuses.includes(membership.status),
+      allowed: ["member", "administrator", "creator"].includes(membership.status)
+        || (membership.status === "restricted" && membership.can_send_messages === true),
       reason: "The bot must be a member with permission to send messages in this group."
     };
   }
