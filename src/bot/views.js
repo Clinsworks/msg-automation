@@ -10,6 +10,7 @@ import {
   subscriptionKeyboard,
   analyticsKeyboard,
   productsKeyboard,
+  paymentDetailsKeyboard,
 } from "./keyboards.js";
 import { listCampaigns } from "../modules/campaigns/service.js";
 import { getActivePlans, getBusinessSubscription, getPaymentHistory } from "../modules/subscriptions/service.js";
@@ -49,7 +50,7 @@ export const paymentDetails = async (ctx) => {
     const details = await PaymentDetails.findOne({ business: ctx.business._id }).lean();
     return {
       text: `<b>💳 Payment details</b>\n\n${details ? `Bank: ${details.bankName || "—"}\nAccount name: ${details.accountName || "—"}\nAccount number: ${details.accountNumber || "—"}\nInstructions: ${details.paymentReference || "—"}` : "No payment details configured."}`,
-      keyboard: backMenuKeyboard(),
+      keyboard: paymentDetailsKeyboard(),
     };
 };
 
@@ -57,7 +58,7 @@ export const dashboard = async (ctx) => {
   const stats = await getDashboardStats(ctx.business._id);
   const current = await getBusinessSubscription(ctx.business._id);
   return {
-    text: `<b>Dashboard</b>\n\nBusiness: ${ctx.business.name}\nAccount status: ${ctx.business.status}\nPlan: ${current?.plan?.name || "Free"}\nCampaigns: ${stats.campaigns}\nMessages attempted: ${stats.attempted}\nSuccessful deliveries: ${stats.successful}\nFailed deliveries: ${stats.failed}\n\nUpcoming scheduled campaigns: ${stats.upcoming}`,
+    text: `<b>Stats</b>\n\nBusiness: ${ctx.business.name}\nAccount status: ${ctx.business.status}\nPlan: ${current?.plan?.name || "Free"}\n\n<b>Cross-posting</b>\nSaved destinations: ${stats.savedDestinations}\nMessages attempted: ${stats.attempted}\nSuccessful deliveries: ${stats.successful}\nFailed deliveries: ${stats.failed}\nSuccess rate: ${stats.successRate}%`,
     keyboard: dashboardKeyboard(),
   };
 };

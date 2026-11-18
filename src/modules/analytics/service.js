@@ -1,4 +1,4 @@
-import { Campaign, CampaignDelivery } from "../../database/models.js";
+import { Campaign, CampaignDelivery, CrossPostDelivery, Recipient } from "../../database/models.js";
 
 const rangeStart = (range) => {
   if (range === "today") return new Date(new Date().setHours(0, 0, 0, 0));
@@ -36,11 +36,27 @@ export const getBusinessAnalytics = async (businessId, range = "all") => {
 };
 
 export const getDashboardStats = async (businessId) => {
-  const analytics = await getBusinessAnalytics(businessId);
-  const upcoming = await Campaign.countDocuments({
-    business: businessId,
-    status: "scheduled",
-    scheduledFor: { $gt: new Date() }
-  });
-  return { ...analytics, upcoming };
+  const [deliveries, savedDestinations] = await Promise.all([
+    CrossPostDelivery.aggregate([
+      { $match: { business: businessId } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
+    Recipient.countDocuments({
+      business: businessId,
+      recipientSource: "personal_sync",
+      selectedForCrossPost: true,
+      sendingEligible: true,
+    }),
+  ]);
+  const totals = deliveries.reduce((summary, item) => ({ ...summary, [item._id]: item.count }), {});
+  const successful = totals.sent || 0;
+  const failed = totals.failed || 0;
+  const attempted = successful + failed;
+  return {
+    attempted,
+    successful,
+    failed,
+    successRate: attempted ? Math.round((successful / attempted) * 100) : 0,
+    savedDestinations,
+  };
 };

@@ -10,6 +10,10 @@ export const startScreen = (ctx) => ({
 });
 
 export const showAdminPanel = async (ctx) => {
+  if (ctx.session.adminUnlocked || ctx.session.superadminUnlocked || ctx.session.staffUnlocked) {
+    await ctx.reply("Admin Panel", { ...mainMenuKeyboard() });
+    return;
+  }
   ctx.session.adminAuth = { step: "password" };
   await ctx.reply("🔒 Enter your admin password:", adminAuthKeyboard());
 };
@@ -22,6 +26,11 @@ export const showGuide = async (ctx) => {
 };
 
 export const requestAdminPassword = async (ctx) => {
+  if (ctx.session.adminUnlocked || ctx.session.superadminUnlocked || ctx.session.staffUnlocked) {
+    await ctx.answerCbQuery();
+    await ctx.editMessageText("Admin Panel", { ...mainMenuKeyboard() });
+    return;
+  }
   ctx.session.adminAuth = { step: "password" };
   await ctx.answerCbQuery();
   await ctx.editMessageText("🔒 Enter your admin password:", { ...adminAuthKeyboard() });

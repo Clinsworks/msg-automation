@@ -17,6 +17,8 @@ const userSchema = new Schema({
 const businessSchema = new Schema({
   name: { type: String, required: true, trim: true, maxlength: 120 },
   description: { type: String, trim: true, maxlength: 500 },
+  supportContact: { type: String, trim: true, maxlength: 200 },
+  setupComplete: { type: Boolean, default: false, index: true },
   owner: { type: objectId(), ref: "User", required: true, unique: true, index: true },
   adminPasswordHash: { type: String, required: true, select: false },
   adminPasswordChangedAt: { type: Date },
@@ -38,7 +40,9 @@ const recipientSchema = new Schema({
   telegramDestinationId: { type: String, required: true },
   displayName: { type: String, required: true, trim: true },
   destinationType: { type: String, enum: ["user", "group", "channel"], required: true },
+  recipientSource: { type: String, enum: ["bot", "personal_sync"], default: "bot", index: true },
   sendingEligible: { type: Boolean, default: false },
+  selectedForCrossPost: { type: Boolean, default: false, index: true },
   consentStatus: { type: String, enum: ["unknown", "granted", "revoked"], default: "unknown" }
 }, timestamps);
 recipientSchema.index({ business: 1, telegramDestinationId: 1 }, { unique: true });
@@ -145,6 +149,13 @@ const winbackCampaignSchema = new Schema({
   sentCount: { type: Number, default: 0 }
 }, timestamps);
 
+const crossPostDeliverySchema = new Schema({
+  business: { type: objectId(), ref: "Business", required: true, index: true },
+  recipient: { type: objectId(), ref: "Recipient", required: true, index: true },
+  status: { type: String, enum: ["sent", "failed"], required: true, index: true },
+  error: { type: String, trim: true, maxlength: 500 }
+}, timestamps);
+
 const planSchema = new Schema({
   name: { type: String, required: true, unique: true, trim: true },
   price: { type: Number, required: true, min: 0 },
@@ -200,6 +211,7 @@ export const Staff = model("Staff", staffSchema);
 export const CrossPostRule = model("CrossPostRule", crossPostRuleSchema);
 export const BotInteraction = model("BotInteraction", botInteractionSchema);
 export const WinbackCampaign = model("WinbackCampaign", winbackCampaignSchema);
+export const CrossPostDelivery = model("CrossPostDelivery", crossPostDeliverySchema);
 export const Plan = model("Plan", planSchema);
 export const Subscription = model("Subscription", subscriptionSchema);
 export const Payment = model("Payment", paymentSchema);

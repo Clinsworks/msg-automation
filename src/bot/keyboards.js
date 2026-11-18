@@ -44,6 +44,11 @@ export const productsKeyboard = () => Markup.inlineKeyboard([
   [button("Back to panel", "nav:main")],
 ]);
 
+export const paymentDetailsKeyboard = () => Markup.inlineKeyboard([
+  [button("✏️ Add or edit payment details", "payment:edit")],
+  [button("Back to panel", "nav:main")],
+]);
+
 export const orderReviewKeyboard = (orderId) => Markup.inlineKeyboard([
   [button("✅ Approve", `order:approve:${orderId}`), button("❌ Reject", `order:reject:${orderId}`)],
 ]);
@@ -90,10 +95,9 @@ export const addBotToGroupKeyboard = (botUsername, ownerId) => Markup.inlineKeyb
 ]);
 
 export const dashboardKeyboard = () => Markup.inlineKeyboard([
-  [button("Create Campaign", "campaign:create"), button("View Campaigns", "campaign:list")],
-  [button("Manage Audience", "nav:audience"), button("View Analytics", "nav:analytics")],
+  [button("Cross-posting", "crosspost:menu")],
   [button("Manage Subscription", "nav:subscription")],
-  [button("Refresh Dashboard", "nav:dashboard"), button("Main Menu", "nav:main")]
+  [button("Refresh Stats", "nav:dashboard"), button("Main Menu", "nav:main")]
 ]);
 
 export const campaignsKeyboard = () => Markup.inlineKeyboard([

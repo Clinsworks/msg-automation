@@ -4,7 +4,14 @@ export class TelegramUserProvider {
   }
 
   async sendMessage(destinationId, text, options = {}) {
-    return this.client.sendMessage(destinationId, { message: text, ...options });
+    if (options.file) {
+      return this.client.sendMessage(destinationId, {
+        message: text,
+        file: options.file,
+        forceDocument: false,
+      });
+    }
+    return this.client.sendMessage(destinationId, { message: text, ...options, buttons });
   }
 
   async getConnectionStatus() {

@@ -1,4 +1,5 @@
 import { Telegraf } from "telegraf";
+import QRCode from "qrcode";
 import { config } from "../config/env.js";
 import { cancelCampaign, chooseDelivery, handleCampaignText, saveDraft, scheduleCampaign, selectAudience, selectMethod, selectRecipients, sendCampaign, showDelivery, showPreview, startCampaign } from "./campaign-flow.js";
 import { addBotToGroupKeyboard, campaignMethodKeyboard, campaignRecipientsKeyboard, channelSelectionKeyboard, contactSelectionKeyboard, customerProductKeyboard, mainMenuKeyboard, orderReviewKeyboard } from "./keyboards.js";
@@ -10,14 +11,16 @@ import { TelegramBotProvider } from "../modules/messaging/providers/telegram-bot
 import { initializePayment } from "../modules/payments/service.js";
 import { updateUserEmail } from "../modules/users/service.js";
 import { getActivePlans } from "../modules/subscriptions/service.js";
-import { beginConnection, completeConnection, disconnectPersonalAccount } from "../modules/telegram/connection-service.js";
+import { beginQrConnection, disconnectPersonalAccount, getPersonalProvider, isPersonalConnectionActive } from "../modules/telegram/connection-service.js";
+import { TelegramUserProvider } from "../modules/telegram/user-provider.js";
+import { CustomFile } from "telegram/client/uploads.js";
 import { findExpiringSubscription, getSubscriptionNotification } from "../modules/notifications/service.js";
 import { BotInteraction, Business, Campaign, Order, PaymentDetails, Product, User } from "../database/models.js";
 import { cancelAdminAuth, forgotAdminPassword, guide, handleAdminPassword, handleSuperadminPassword, isSuperadmin, requestAdminPassword, showAdminPanel, showGuide, startPasswordChange, startScreen, startSuperadminAuth } from "./auth-flow.js";
 import { hashPassword } from "../modules/auth/password.js";
 import { getStaffWorkspace, addStaffMember, listStaff, revokeStaffMember } from "../modules/staff/service.js";
 import { createWinbackCampaign, findWinbackRecipients, recordInteraction } from "../modules/winback/service.js";
-import { processCrossPostMessage, saveCrossPostRule, listCrossPostRules } from "../modules/crossposting/service.js";
+import { clearPersonalRecipients, getSelectedCrossPostRecipients, listPersonalRecipients, processCrossPostMessage, sendToRecipients, setCrossPostRecipientSelected, syncPersonalDialogs } from "../modules/crossposting/service.js";
 
 const render = async (ctx, view, viewArgument = ctx.from) => {
   const { text, keyboard } = await view(viewArgument);
@@ -28,6 +31,46 @@ const render = async (ctx, view, viewArgument = ctx.from) => {
   }
 };
 
+const startQrLogin = async (ctx) => {
+  await beginQrConnection({
+    businessId: ctx.business._id,
+    onQrCode: async ({ url, expires }) => {
+      const image = await QRCode.toBuffer(url, { type: "png", width: 360, margin: 2 });
+      await ctx.replyWithPhoto(
+        { source: image },
+        { caption: `Scan this QR code in the official Telegram app.\nIt expires in about ${Math.max(1, Math.ceil((expires * 1000 - Date.now()) / 1000))} seconds.\n\nDo not forward this QR code.` },
+      );
+    },
+    onTwoFactorRequired: async ({ token, hint }) => {
+      if (!config.publicBaseUrl) {
+        throw new Error("PUBLIC_BASE_URL must be configured for secure Telegram 2FA login.");
+      }
+      const publicUrl = new URL(config.publicBaseUrl);
+      if (publicUrl.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(publicUrl.hostname)) {
+        throw new Error("PUBLIC_BASE_URL must use HTTPS for Telegram 2FA login.");
+      }
+      const baseUrl = config.publicBaseUrl.replace(/\/$/, "");
+      await ctx.reply(
+        `Telegram requires your two-step verification password. Open this secure page to continue:\n${baseUrl}/telegram/2fa/${encodeURIComponent(token)}\n\n${hint ? `Telegram hint: ${hint}\n` : ""}The link expires in 10 minutes and must not be shared.`,
+      );
+    },
+    onConnected: async ({ username }) => {
+      await ctx.reply(`Telegram account connected successfully: @${username || "account"}`);
+    },
+    onError: async (error) => {
+      const message = error?.code === "TELEGRAM_QR_EXPIRED"
+        ? "The QR code expired without being scanned. Would you like to try again?"
+        : error?.code === "TELEGRAM_2FA_REQUIRED"
+        ? "QR scan succeeded. A secure 2FA password page has been sent above."
+        : `Telegram QR login failed: ${error.message}`;
+      await ctx.reply(message, error?.code === "TELEGRAM_QR_EXPIRED"
+        ? { reply_markup: { inline_keyboard: [[{ text: "Try again", callback_data: "crosspost:retry-connect" }], [{ text: "Main Menu", callback_data: "nav:main" }]] } }
+        : undefined);
+    },
+  });
+  await ctx.reply("QR login started. Open Telegram on your phone, go to Settings → Devices → Link Desktop Device, and scan the QR code.");
+};
+
 const runCampaignAction = (action) => async (ctx) => {
   try {
     await action(ctx);
@@ -35,6 +78,33 @@ const runCampaignAction = (action) => async (ctx) => {
     console.error("Campaign action failed:", error);
     await ctx.answerCbQuery("Campaign action failed");
     await ctx.reply(`Unable to complete that campaign action: ${error.message}`);
+  }
+};
+
+const sendCrossPost = async (ctx) => {
+  const crossPost = ctx.session.crossPost;
+  let personal;
+  try {
+    personal = await getPersonalProvider(ctx.business._id);
+    const options = {};
+    if (crossPost.media) {
+      const fileUrl = await ctx.telegram.getFileLink(crossPost.media.fileId);
+      const response = await fetch(fileUrl);
+      if (!response.ok) throw new Error(`Unable to download the image (${response.status}).`);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      options.file = new CustomFile("cross-post.jpg", bytes.length, "", bytes);
+    }
+    const result = await sendToRecipients({
+      businessId: ctx.business._id,
+      recipientIds: crossPost.selectedIds,
+      text: crossPost.media ? crossPost.media.caption : crossPost.message,
+      options,
+      provider: new TelegramUserProvider(personal.client),
+    });
+    delete ctx.session.crossPost;
+    await ctx.reply(`Cross-post sent to ${result.sent} selected chat(s).${result.failures.length ? ` Failed: ${result.failures.join("; ")}` : ""}`, mainMenuKeyboard());
+  } finally {
+    if (personal) await personal.client.disconnect().catch((error) => console.error("Personal cross-post client disconnect failed:", error));
   }
 };
 
@@ -53,7 +123,7 @@ export const createBot = () => {
       ctx.session.staffUnlocked = true;
       ctx.staffMembership = staffWorkspace.staff;
     }
-    if (ctx.chat?.type === "private") {
+    if (ctx.chat?.type === "private" && !String(ctx.message?.text || "").startsWith("/start crosspost_")) {
       await recordInteraction({ businessId: ctx.business._id, telegramUserId: ctx.from.id, displayName: ctx.from.first_name });
     }
     await next();
@@ -86,6 +156,37 @@ export const createBot = () => {
 
   bot.start(async (ctx) => {
     const payload = ctx.startPayload || "";
+    if (!payload && !ctx.staffMembership && !ctx.business.setupComplete) {
+      ctx.session.businessSetup = { step: "name" };
+      await ctx.reply("Welcome! Let's customize your business.\n\nStep 1 of 4: Send your business name.");
+      return;
+    }
+    if (payload.startsWith("crosspost_")) {
+      const businessId = payload.slice("crosspost_".length);
+      const business = await Business.findById(businessId).lean();
+      if (!business) {
+        await ctx.reply("This campaign is no longer available.");
+        return;
+      }
+      ctx.business = business;
+      await recordInteraction({
+        businessId: business._id,
+        telegramUserId: ctx.from.id,
+        displayName: ctx.from.first_name,
+      });
+      const items = await Product.find({ business: business._id, active: true }).sort({ createdAt: -1 }).limit(50).lean();
+      if (!items.length) {
+        await ctx.reply("Thanks for opening this offer. The business has no products available yet.");
+        return;
+      }
+      await ctx.reply("<b>Choose a product</b>", {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: items.map((item) => [{ text: `🛒 ${item.name}`, callback_data: `order:start:${item._id}` }]),
+        },
+      });
+      return;
+    }
     if (payload.startsWith("add_recipient_")) {
       const ownerId = payload.slice("add_recipient_".length);
       if (String(ctx.from.id) !== ownerId) {
@@ -129,23 +230,37 @@ export const createBot = () => {
   bot.hears("Support", (ctx) => render(ctx, help));
   bot.hears("Cancel", (ctx) => ctx.reply("Chat selection cancelled."));
   bot.on("photo", async (ctx, next) => {
-    if (!ctx.session.order) return next();
-    const order = await Order.findById(ctx.session.order.orderId).populate("product", "name");
-    if (!order || String(order.customerTelegramUserId) !== String(ctx.from.id)) {
-      await ctx.reply("This order is no longer available.");
+    if (ctx.session.order) {
+      const order = await Order.findById(ctx.session.order.orderId).populate("product", "name");
+      if (!order || String(order.customerTelegramUserId) !== String(ctx.from.id)) {
+        await ctx.reply("This order is no longer available.");
+        return;
+      }
+      order.receiptFileId = ctx.message.photo.at(-1).file_id;
+      order.receiptText = ctx.message.caption || "";
+      order.status = "pending_approval";
+      await order.save();
+      delete ctx.session.order;
+      const business = await Business.findById(order.business).select("owner").lean();
+      const owner = business?.owner ? await User.findById(business.owner).lean() : null;
+      if (owner?.telegramUserId) {
+        await ctx.telegram.sendMessage(owner.telegramUserId, `🧾 New order pending approval\nProduct: ${order.product.name}\nCustomer: ${ctx.from.first_name || ctx.from.id}`, orderReviewKeyboard(order._id));
+      }
+      await ctx.reply("Receipt received. The seller will review your order and notify you.");
       return;
     }
-    order.receiptFileId = ctx.message.photo.at(-1).file_id;
-    order.receiptText = ctx.message.caption || "";
-    order.status = "pending_approval";
-    await order.save();
-    delete ctx.session.order;
-    const business = await Business.findById(order.business).select("owner").lean();
-    const owner = business?.owner ? await User.findById(business.owner).lean() : null;
-    if (owner?.telegramUserId) {
-      await ctx.telegram.sendMessage(owner.telegramUserId, `🧾 New order pending approval\nProduct: ${order.product.name}\nCustomer: ${ctx.from.first_name || ctx.from.id}`, orderReviewKeyboard(order._id));
+    if (ctx.session.crossPost?.step === "message") {
+      ctx.session.crossPost.media = {
+        fileId: ctx.message.photo.at(-1).file_id,
+        caption: ctx.message.caption || "",
+      };
+      ctx.session.crossPost.step = "media-confirm";
+      await ctx.reply("Image saved. Its caption is ready to send. Cancel if you do not want to continue.", {
+        reply_markup: { inline_keyboard: [[{ text: "Send now", callback_data: "crosspost:send-now" }], [{ text: "Cancel", callback_data: "crosspost:cancel" }]] },
+      });
+      return;
     }
-    await ctx.reply("Receipt received. The seller will review your order and notify you.");
+    return next();
   });
   bot.on("message", async (ctx, next) => {
     const sharedUsers = ctx.message?.users_shared?.user_ids || [];
@@ -180,6 +295,45 @@ export const createBot = () => {
   bot.on("text", async (ctx, next) => {
     if (await handleSuperadminPassword(ctx)) return;
     if (await handleAdminPassword(ctx)) return;
+    if (ctx.session.businessSetup) {
+      const setup = ctx.session.businessSetup;
+      const value = ctx.message.text.trim();
+      if (setup.step === "name") {
+        if (!value || value.length > 120) { await ctx.reply("Send a business name between 1 and 120 characters."); return; }
+        setup.name = value;
+        setup.step = "description";
+        await ctx.reply("Step 2 of 4: Send a short description of your business.");
+      } else if (setup.step === "description") {
+        if (value.length > 500) { await ctx.reply("Keep the description to 500 characters or less."); return; }
+        setup.description = value;
+        setup.step = "support";
+        await ctx.reply("Step 3 of 4: Send a support contact, such as @username or a phone number.");
+      } else if (setup.step === "support") {
+        if (!value || value.length > 200) { await ctx.reply("Send a support contact between 1 and 200 characters."); return; }
+        setup.supportContact = value;
+        setup.step = "password";
+        await ctx.reply("Step 4 of 4: Choose an admin password. It must be at least 8 characters.");
+      } else if (setup.step === "password") {
+        if (value.length < 8) { await ctx.reply("The admin password must be at least 8 characters."); return; }
+        setup.password = value;
+        setup.step = "confirmPassword";
+        await ctx.reply("Send the admin password again to confirm it.");
+      } else if (setup.step === "confirmPassword") {
+        if (value !== setup.password) { await ctx.reply("Passwords did not match. Send the password again."); return; }
+        const business = await Business.findById(ctx.business._id).select("+adminPasswordHash");
+        business.name = setup.name;
+        business.description = setup.description;
+        business.supportContact = setup.supportContact;
+        business.adminPasswordHash = await hashPassword(setup.password);
+        business.adminPasswordChangedAt = new Date();
+        business.setupComplete = true;
+        await business.save();
+        delete ctx.session.businessSetup;
+        ctx.session.adminUnlocked = true;
+        await ctx.reply("Business setup complete. Your admin panel is ready.", mainMenuKeyboard());
+      }
+      return;
+    }
     if (ctx.session.product) {
       const product = ctx.session.product;
       if (product.step === "name") {
@@ -283,17 +437,13 @@ export const createBot = () => {
       }
       return;
     }
-    if (ctx.session.crossPost) {
+    if (ctx.session.crossPost?.step === "message") {
       const crossPost = ctx.session.crossPost;
-      if (crossPost.step === "sourceChatId") {
-        crossPost.sourceChatId = ctx.message.text.trim();
-        crossPost.step = "destinations";
-        await ctx.reply("Send recipient record IDs separated by commas.");
-      } else {
-        const destinationIds = ctx.message.text.split(",").map((value) => value.trim()).filter(Boolean);
-        await saveCrossPostRule({ businessId: ctx.business._id, sourceChatId: crossPost.sourceChatId, destinationIds, mode: "copy" });
-        delete ctx.session.crossPost;
-        await ctx.reply("Cross-post rule saved. New messages from that source will be copied to the selected destinations.", mainMenuKeyboard());
+      try {
+        crossPost.message = ctx.message.text;
+        await sendCrossPost(ctx);
+      } catch (error) {
+        await ctx.reply(`Unable to prepare the cross-post: ${error.message}`);
       }
       return;
     }
@@ -333,31 +483,10 @@ export const createBot = () => {
     await ctx.reply("Billing email saved securely.");
   });
   bot.command("connecttelegram", async (ctx) => {
-    const phoneNumber = ctx.message.text.split(/\s+/)[1];
-    if (!phoneNumber) {
-      await ctx.reply("Usage: /connecttelegram +2348012345678");
-      return;
-    }
     try {
-      await beginConnection({ businessId: ctx.business._id, phoneNumber });
-      ctx.session.telegramAuth = { step: "code" };
-      await ctx.reply("Telegram sent a verification code. Reply with /telegramcode <code>. Never share this code with anyone.");
+      await startQrLogin(ctx);
     } catch (error) {
-      await ctx.reply(`Unable to start Telegram connection: ${error.message}`);
-    }
-  });
-  bot.command("telegramcode", async (ctx) => {
-    const code = ctx.message.text.split(/\s+/)[1];
-    if (!code) {
-      await ctx.reply("Usage: /telegramcode <verification_code>");
-      return;
-    }
-    try {
-      const account = await completeConnection({ businessId: ctx.business._id, phoneCode: code });
-      delete ctx.session.telegramAuth;
-      await ctx.reply(`Personal Telegram account connected: @${account.username || "account"}`);
-    } catch (error) {
-      await ctx.reply(`Unable to complete Telegram connection: ${error.message}`);
+      await ctx.reply(`Unable to start QR login: ${error.message}`);
     }
   });
   bot.command("disconnecttelegram", async (ctx) => {
@@ -385,7 +514,7 @@ export const createBot = () => {
   bot.command("recipients", async (ctx) => {
     const recipients = await listRecipients(ctx.business._id, { sendingEligible: true });
     const text = recipients.length
-      ? recipients.map((recipient) => `• ${recipient.displayName} (${recipient.destinationType})`).join("\n")
+      ? recipients.map((recipient) => `• ${recipient.displayName} (${recipient.destinationType})\n  Recipient ID: ${recipient._id}\n  Telegram ID: ${recipient.telegramDestinationId}`).join("\n")
       : "No eligible recipients have been added.";
     await ctx.reply(`<b>Eligible recipients</b>\n\n${text}`, { parse_mode: "HTML" });
   });
@@ -420,18 +549,121 @@ export const createBot = () => {
   });
   bot.action("crosspost:menu", async (ctx) => {
     await ctx.answerCbQuery();
-    const rules = await listCrossPostRules(ctx.business._id);
+    const connected = await isPersonalConnectionActive(ctx.business._id);
+    const savedRecipients = connected ? await getSelectedCrossPostRecipients(ctx.business._id) : [];
     await ctx.reply(
-      rules.length
-        ? `📣 Cross-post rules\n\n${rules.map((rule) => `• ${rule.sourceChatId} → ${rule.destinationRecipients.length} destination(s) (${rule.active ? "active" : "paused"})`).join("\n")}`
-        : "📣 No cross-post rules configured.",
-      { reply_markup: { inline_keyboard: [[{ text: "Create rule", callback_data: "crosspost:create" }], [{ text: "Main Menu", callback_data: "nav:main" }]] } },
+      connected
+        ? `📣 <b>Cross-posting</b>\n\nSend one message from your connected Telegram account to saved chats and groups.${savedRecipients.length ? `\n\n${savedRecipients.length} destination(s) are saved.` : ""}`
+        : "📣 <b>Cross-posting</b>\n\nConnect your Telegram account once, then sync your chats and groups. No Telegram IDs are needed.",
+      { parse_mode: "HTML", reply_markup: { inline_keyboard: connected
+        ? [[{ text: "📤 Send to saved chats", callback_data: "crosspost:send-saved" }], [{ text: "🔄 Sync chats and groups", callback_data: "crosspost:sync-personal" }], [{ text: "🗑 Clear saved chats", callback_data: "crosspost:clear" }], [{ text: "Cancel", callback_data: "crosspost:cancel" }]]
+        : [[{ text: "🔐 Connect Telegram account", callback_data: "crosspost:connect" }], [{ text: "Cancel", callback_data: "crosspost:cancel" }]] } },
     );
   });
-  bot.action("crosspost:create", async (ctx) => {
+  bot.action("crosspost:cancel", async (ctx) => {
+    delete ctx.session.crossPost;
+    await ctx.answerCbQuery("Cross-posting cancelled");
+    await ctx.reply("Cross-posting cancelled.", mainMenuKeyboard());
+  });
+  bot.action("crosspost:send-now", async (ctx) => {
     await ctx.answerCbQuery();
-    ctx.session.crossPost = { step: "sourceChatId" };
-    await ctx.reply("Send the source Telegram chat ID. The bot must be a member of that chat.");
+    try {
+      await sendCrossPost(ctx);
+    } catch (error) {
+      await ctx.reply(`Unable to send the cross-post: ${error.message}`);
+    }
+  });
+  bot.action("crosspost:clear", async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply("Clear all saved personal chats and groups? This cannot be undone.", {
+      reply_markup: { inline_keyboard: [[{ text: "Yes, clear them", callback_data: "crosspost:clear-confirm" }], [{ text: "Cancel", callback_data: "crosspost:cancel" }]] },
+    });
+  });
+  bot.action("crosspost:clear-confirm", async (ctx) => {
+    const count = await clearPersonalRecipients(ctx.business._id);
+    delete ctx.session.crossPost;
+    await ctx.answerCbQuery("Saved chats cleared");
+    await ctx.reply(`${count} saved personal chat(s) and group(s) were cleared. Synced chats remain available.`, mainMenuKeyboard());
+  });
+  bot.action("crosspost:send-saved", async (ctx) => {
+    const recipients = await getSelectedCrossPostRecipients(ctx.business._id);
+    if (!recipients.length) {
+      await ctx.answerCbQuery("Sync chats and save at least one destination first.", { show_alert: true });
+      return;
+    }
+    ctx.session.crossPost = { step: "message", selectedIds: recipients.map((recipient) => String(recipient._id)) };
+    await ctx.answerCbQuery();
+    const bot = await ctx.telegram.getMe();
+    await ctx.reply(`Send the message for ${recipients.length} saved chat(s) and group(s).\n\nTo track interested customers, paste this link:\nhttps://t.me/${bot.username}?start=crosspost_${ctx.business._id}`, {
+      reply_markup: { inline_keyboard: [[{ text: "Cancel", callback_data: "crosspost:cancel" }]] },
+    });
+  });
+  bot.action("crosspost:connect", async (ctx) => {
+    await ctx.answerCbQuery();
+    try {
+      await startQrLogin(ctx);
+    } catch (error) {
+      await ctx.reply(`Unable to start QR login: ${error.message}`);
+    }
+  });
+  bot.action("crosspost:retry-connect", async (ctx) => {
+    await ctx.answerCbQuery();
+    try {
+      await startQrLogin(ctx);
+    } catch (error) {
+      await ctx.reply(`Unable to start QR login: ${error.message}`);
+    }
+  });
+  bot.action("crosspost:sync-personal", async (ctx) => {
+    await ctx.answerCbQuery();
+    let connection;
+    try {
+      const personal = await getPersonalProvider(ctx.business._id);
+      connection = personal.client;
+      const recipients = await syncPersonalDialogs({ businessId: ctx.business._id, client: connection });
+      await connection.disconnect();
+      const selectedIds = recipients.filter((recipient) => recipient.selectedForCrossPost).map((recipient) => String(recipient._id));
+      ctx.session.crossPost = { step: "select", selectedIds };
+      await ctx.reply("Select the chats and groups that should receive the next message.", {
+        reply_markup: {
+          inline_keyboard: [
+            ...recipients.slice(0, 80).map((recipient) => [{ text: `${selectedIds.includes(String(recipient._id)) ? "☑" : "☐"} ${recipient.displayName}`, callback_data: `crosspost:toggle:${recipient._id}` }]),
+            [{ text: "Send message", callback_data: "crosspost:compose" }],
+            [{ text: "Cancel", callback_data: "crosspost:cancel" }],
+          ],
+        },
+      });
+    } catch (error) {
+      if (connection) await connection.disconnect().catch(() => {});
+      await ctx.reply(`Unable to scan the connected Telegram account: ${error.message}`);
+    }
+  });
+  bot.action(/^crosspost:toggle:(.+)$/, async (ctx) => {
+    const selectedIds = ctx.session.crossPost?.selectedIds || [];
+    const id = ctx.match[1];
+    const selected = !selectedIds.includes(id);
+    const nextSelectedIds = selected ? [...selectedIds, id] : selectedIds.filter((item) => item !== id);
+    await setCrossPostRecipientSelected({ businessId: ctx.business._id, recipientId: id, selected });
+    const recipients = await listPersonalRecipients(ctx.business._id);
+    ctx.session.crossPost = { step: "select", selectedIds: nextSelectedIds };
+    await ctx.editMessageReplyMarkup({
+      inline_keyboard: [
+        ...recipients.slice(0, 80).map((recipient) => [{ text: `${nextSelectedIds.includes(String(recipient._id)) ? "☑" : "☐"} ${recipient.displayName}`, callback_data: `crosspost:toggle:${recipient._id}` }]),
+        [{ text: "Send message", callback_data: "crosspost:compose" }],
+        [{ text: "Cancel", callback_data: "crosspost:cancel" }],
+      ],
+    });
+    await ctx.answerCbQuery(`${nextSelectedIds.length} saved`);
+  });
+  bot.action("crosspost:compose", async (ctx) => {
+    if (!ctx.session.crossPost?.selectedIds?.length) {
+      await ctx.answerCbQuery("Select at least one chat or group", { show_alert: true });
+      return;
+    }
+    ctx.session.crossPost.step = "message";
+    await ctx.answerCbQuery();
+    const bot = await ctx.telegram.getMe();
+    await ctx.reply(`Send the message for ${ctx.session.crossPost.selectedIds.length} selected chat(s).\n\nTo track interested customers, paste this link into the message:\nhttps://t.me/${bot.username}?start=crosspost_${ctx.business._id}`);
   });
   bot.action("winback:menu", async (ctx) => {
     await ctx.answerCbQuery();
